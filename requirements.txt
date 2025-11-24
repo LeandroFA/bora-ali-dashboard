@@ -1,12 +1,10 @@
-streamlit
 pandas
 numpy
 plotly
-pydeck
+streamlit
 prophet
-python-pptx
-kaleido
-cmdstanpy
+scikit-learn
+requests
 
 
 
