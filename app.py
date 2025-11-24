@@ -15,10 +15,8 @@ from prophet.plot import plot_plotly
 # CONFIGURAÇÃO GERAL E ESTILO
 # ================================
 CSV_FILE = "INMET_ANAC_ROTAS_APENAS_CAPITAIS.csv"
-OUTPUT_PATH = "outputs"
-os.makedirs(OUTPUT_PATH, exist_ok=True)
 
-# Paleta Jovem e Profissional
+# Paleta Jovem e Profissional (Bora Alí)
 PRIMARY = "#006DCE"      # Azul Bora Alí
 ACCENT = "#FF6B4A"       # Coral Bora Alí
 GOLD = "#FDBA74"
@@ -41,7 +39,7 @@ h1, h2, h3, h4 {{color:{PRIMARY}; font-weight:800;}}
 
 
 # ================================
-# CARREGAR DADOS
+# CARREGAR DADOS DA RAIZ
 # ================================
 @st.cache_data
 def load_data():
@@ -61,13 +59,28 @@ df = load_data()
 # ================================
 # FILTROS
 # ================================
-st.sidebar.header("🎛️ Filtros — Escolha sua viagem!")
+st.sidebar.header("🎛️ Filtros — customize sua rota!")
+
 anos = st.sidebar.multiselect("📅 Ano", sorted(df["ANO"].unique()), default=sorted(df["ANO"].unique()))
 meses = st.sidebar.multiselect("🗓️ Mês", list(range(1, 13)), default=list(range(1, 13)))
-companias = st.sidebar.multiselect("🛫 Companhias aéreas", sorted(df["COMPANHIA"].unique()), default=sorted(df["COMPANHIA"].unique()))
+companias = st.sidebar.multiselect("🛫 Companhia Aérea", sorted(df["COMPANHIA"].unique()), default=sorted(df["COMPANHIA"].unique()))
 
-df = df[df["ANO"].isin(anos) & df["MES"].isin(meses) & df["COMPANHIA"].isin(companias)]
+# 🌤️ FILTRO NOVO: ESTAÇÕES
+def estacao(mes):
+    if mes in [12,1,2]:
+        return "Verão"
+    elif mes in [3,4,5]:
+        return "Outono"
+    elif mes in [6,7,8]:
+        return "Inverno"
+    else:
+        return "Primavera"
 
+df["ESTACAO"] = df["MES"].apply(estacao)
+estacoes_list = ["Verão","Outono","Inverno","Primavera"]
+estacao_filter = st.sidebar.multiselect("🌡️ Estação", estacoes_list, default=estacoes_list)
+
+df = df[(df["ANO"].isin(anos)) & (df["MES"].isin(meses)) & (df["COMPANHIA"].isin(companias)) & (df["ESTACAO"].isin(estacao_filter))]
 
 # ================================
 # LISTA DE CAPITAIS (COORDENADAS)
@@ -84,12 +97,9 @@ CAPITAIS = {
     'Aracaju': (-10.9472, -37.0731),'São Paulo': (-23.55052, -46.633308),'Palmas': (-10.184, -48.333)
 }
 
-caps = st.sidebar.multiselect("🏙️ Capitais", list(CAPITAIS.keys()), default=["São Paulo","Rio de Janeiro","Recife","Brasília","Manaus"])
+cap_filter = st.sidebar.multiselect("🏙️ Capitais", list(CAPITAIS.keys()), default=["São Paulo","Rio de Janeiro","Brasília","Recife","Manaus"])
 
-
-# ================================
-# SEPARAR ROTA E FILTRAR
-# ================================
+# Sep. origem/destino
 def rota(r):
     if "→" in r:
         p = r.split("→")
@@ -97,13 +107,13 @@ def rota(r):
     return None, None
 
 df[["ORIG","DEST"]] = df["ROTA"].apply(lambda x: pd.Series(rota(x)))
-df = df[df["ORIG"].isin(caps) & df["DEST"].isin(caps)]
+df = df[df["ORIG"].isin(cap_filter) & df["DEST"].isin(cap_filter)]
 
 
 # ================================
 # 🌍 MAPA — TARIFAS X CLIMA
 # ================================
-st.header("📍 Mapa Bora Alí — Onde Clima e Tarifas se Encontram ✈️🌤️")
+st.header("📍 Onde clima e preço se encontram? Bora descobrir! 🧳💸")
 
 agg = df.groupby("DEST").agg(tarifa=("TARIFA","mean"), temp=("TEMP_MEDIA","mean")).reset_index()
 agg["lat"] = agg["DEST"].map(lambda x: CAPITAIS.get(x,(np.nan,np.nan))[0])
@@ -113,14 +123,13 @@ m1 = px.scatter_mapbox(
     agg.dropna(), lat="lat", lon="lon", size="tarifa", color="temp",
     size_max=45, zoom=3, color_continuous_scale="thermal", hover_name="DEST"
 )
-m1.update_layout(mapbox_style="carto-positron", margin=0)
+m1.update_layout(mapbox_style="carto-positron", margin={"r":0,"t":0,"l":0,"b":0})
 st.plotly_chart(m1, use_container_width=True)
-
 
 # ================================
 # 🛰️ MAPA — ROTAS
 # ================================
-st.header("🛫 Bora de rota entre capitais?")
+st.header("🛫 Rotas diretas entre capitais")
 
 rotas = df.groupby("ROTA").agg(tarifa=("TARIFA","mean")).reset_index()
 rotas[["ORIG","DEST"]] = rotas["ROTA"].apply(lambda x: pd.Series(rota(x)))
@@ -137,25 +146,19 @@ st.pydeck_chart(pdk.Deck(
     map_style="mapbox://styles/mapbox/light-v9"
 ))
 
-# ================================
-# 📊 TARIFA POR ESTAÇÕES (COM LABEL)
-# ================================
-st.header("🌦️ Quanto custa voar nas estações do ano?")
 
-def estacao(mes):
-    return ("Verão" if mes in [12,1,2] else
-            "Outono" if mes in [3,4,5] else
-            "Inverno" if mes in [6,7,8] else "Primavera")
+# ================================
+# 📊 BARRAS — ESTAÇÕES
+# ================================
+st.header("🌦️ Quanto custa voar em cada estação do ano?")
 
-df["ESTACAO"] = df["MES"].apply(estacao)
 est = df.groupby("ESTACAO").agg(tarifa=("TARIFA","mean")).reset_index()
 est["tarifa"] = est["tarifa"].round(0)
 
 fig_est = px.bar(
-    est, x="ESTACAO", y="tarifa", color="ESTACAO",
-    text="tarifa",
+    est, x="ESTACAO", y="tarifa", color="ESTACAO", text="tarifa",
     color_discrete_sequence=[PRIMARY, ACCENT, GOLD, PURPLE],
-    title="💸 Tarifa média por estação (R$)"
+    title="💸 Tarifa Média por Estação (R$)"
 )
 fig_est.update_traces(texttemplate="R$ %{text:.0f}", textposition="outside")
 fig_est.update_layout(yaxis_title="Preço médio (R$)")
@@ -163,9 +166,9 @@ st.plotly_chart(fig_est, use_container_width=True)
 
 
 # ================================
-# 🌎 TARIFA POR REGIÃO (COM LABEL)
+# 📊 BARRAS — REGIÕES
 # ================================
-st.header("🧭 Qual região do Brasil é mais cara para voar?")
+st.header("🧭 Qual região brasileira é mais cara para voar?")
 
 REGIOES = {
     "Norte": ["Belém","Macapá","Manaus","Boa Vista","Rio Branco","Porto Velho","Palmas"],
@@ -186,10 +189,9 @@ reg = df.groupby("REGIAO").agg(tarifa=("TARIFA","mean")).reset_index()
 reg["tarifa"] = reg["tarifa"].round(0)
 
 fig_reg = px.bar(
-    reg, x="REGIAO", y="tarifa", color="REGIAO",
-    text="tarifa",
-    color_discrete_sequence=[PRIMARY, ACCENT, GREEN, PURPLE, RED],
-    title="📍 Tarifa média por região do Brasil"
+    reg, x="REGIOA", y="tarifa", color="REGIOA",
+    text="tarifa", color_discrete_sequence=[PRIMARY, ACCENT, GREEN, PURPLE, RED],
+    title="📍 Tarifa Média por Região do Brasil"
 )
 fig_reg.update_traces(texttemplate="R$ %{text:.0f}", textposition="outside")
 fig_reg.update_layout(yaxis_title="Preço médio (R$)")
@@ -199,9 +201,9 @@ st.plotly_chart(fig_reg, use_container_width=True)
 # ================================
 # 📈 PREVISÃO — 2026
 # ================================
-st.header("📈 Bora prever a tarifa da sua rota em 2026? 👀✨")
+st.header("📈 Bora prever o futuro? ✨")
 
-sel = st.selectbox("Selecione uma rota para prever:", sorted(df["ROTA"].unique()))
+sel = st.selectbox("Escolha uma rota:", sorted(df["ROTA"].unique()))
 dfm = df[df["ROTA"] == sel].groupby("DATA").agg(tarifa=("TARIFA","mean"), temp=("TEMP_MEDIA","mean")).reset_index()
 
 if dfm.shape[0] > 12:
@@ -214,5 +216,5 @@ if dfm.shape[0] > 12:
 else:
     st.warning("⚠️ Dados insuficientes para prever esta rota.")
 
-
 st.markdown("💙 Feito com carinho aéreo pelo **Bora Alí** ✈️🧳")
+
