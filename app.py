@@ -1,119 +1,92 @@
-# BoraAli_Streamlit_Perfect.py
-# Streamlit app improved: mapas de rotas, 7+ insights interativos, hover limpo (somente tarifa/temp_media)
-# Copie este arquivo para o seu projeto e rode: streamlit run BoraAli_Streamlit_Perfect.py
+# app.py — Bora Alí (versão com pydeck + Prophet)
+# Rode: streamlit run app.py
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import pydeck as pdk
+from prophet import Prophet
+from prophet.plot import plot_plotly
 from datetime import datetime
 
-st.set_page_config(layout="wide", page_title="Bora Alí — Capitais (Perfeito)")
+st.set_page_config(layout="wide", page_title="Bora Alí — Capitais", page_icon="✈️")
 
 # -------------------------
-# CONFIG: caminho para arquivos enviados (o sistema transformará esses caminhos em URLs quando necessário)
-PDF_SOURCE_1 = "/mnt/data/Bora Alí — Capitais · Streamlit.pdf"
-PDF_SOURCE_2 = "/mnt/data/Bora Alí — Dashboard (Capitais) · Streamlit.pdf"
-# Caminho default para CSV (se tiver). Substitua pelo seu dataset real ou use o upload abaixo.
-DEFAULT_CSV = "data/capitais_clean.csv"
-# -------------------------
+# CONFIG: default CSV (raw GitHub URL do seu repo)
+DEFAULT_CSV = "https://raw.githubusercontent.com/LeandroFA/bora-ali-dashboard/main/INMET_ANAC_ROTAS_APENAS_CAPITAIS.csv"
 
-# UTIL ------------------------------------------------
+# -------------------------
 @st.cache_data
-def safe_read_csv(path):
+def read_csv(path_or_buffer):
     try:
-        df = pd.read_csv(path, parse_dates=True, dayfirst=True, low_memory=False)
+        if hasattr(path_or_buffer, "read"):
+            df = pd.read_csv(path_or_buffer, low_memory=False)
+        else:
+            df = pd.read_csv(path_or_buffer, low_memory=False)
     except Exception as e:
-        st.error(f"Não foi possível ler {path}: {e}")
+        st.error(f"Erro lendo CSV: {e}")
         return pd.DataFrame()
-    # normalize cols
+    # normalize column names
     df.columns = [c.strip().lower() for c in df.columns]
     return df
 
-
-def normalize_and_prepare(df):
-    # rename typical columns
+def normalize(df):
     rename_map = {
-        "tarifa_":"tarifa","price":"tarifa",
+        "tarifa_":"tarifa","price":"tarifa","valor":"tarifa",
         "temp_media":"temp_media","temp":"temp_media",
         "orig":"origem","dst":"destino",
         "longitude":"lon","latitude":"lat"
     }
     df = df.rename(columns={k:v for k,v in rename_map.items() if k in df.columns})
-
-    # guarantee numeric
     if 'tarifa' in df.columns:
         df['tarifa'] = pd.to_numeric(df['tarifa'], errors='coerce')
     if 'temp_media' in df.columns:
         df['temp_media'] = pd.to_numeric(df['temp_media'], errors='coerce')
-
-    # try to ensure a datetime column
     if 'data' in df.columns:
-        try:
-            df['data'] = pd.to_datetime(df['data'], dayfirst=True, errors='coerce')
-            df['ano'] = df['data'].dt.year
-            df['mes'] = df['data'].dt.month
-        except Exception:
-            pass
-
-    # if rota not exists, create from origem/destino
+        df['data'] = pd.to_datetime(df['data'], dayfirst=True, errors='coerce')
+        df['ano'] = df['data'].dt.year
+        df['mes'] = df['data'].dt.month
+    # build rota if missing
     if 'rota' not in df.columns and 'origem' in df.columns and 'destino' in df.columns:
-        df['rota'] = df['origem'].astype(str) + ' - ' + df['destino'].astype(str)
-
+        df['rota'] = df['origem'].astype(str) + " - " + df['destino'].astype(str)
     # drop rows without tarifa
     if 'tarifa' in df.columns:
         df = df.dropna(subset=['tarifa'])
-
     return df
 
-# Hover template helper: hides lat/lon
 def hover_template_destino():
-    return '<b>%{customdata[0]}</b><br>Tarifa média: R$ %{customdata[1]:.2f}<br>Temp média: %{customdata[2]:.1f}°C<extra></extra>'
-
-# Smooth line interpolation (linear interpolation used for simplicity)
-def smooth_line(lat1, lon1, lat2, lon2, points=10):
-    lats = np.linspace(lat1, lat2, points)
-    lons = np.linspace(lon1, lon2, points)
-    return lats, lons
+    return "<b>%{properties.name}</b><br>Tarifa média: R$ %{properties.tarifa:.2f}<br>Temp média: %{properties.temp_media:.1f}°C"
 
 # -------------------------
-# DATA LOAD UI
-st.sidebar.header("Carregar dados")
-upload = st.sidebar.file_uploader("Carregue seu CSV (ou deixe em branco para usar DEFAULT_CSV)", type=['csv'])
-use_pdf_refs = st.sidebar.checkbox("Mostrar referências de PDFs (enviados)", value=True)
+# Sidebar: upload / source / filters
+st.sidebar.title("Bora Alí — Controles")
+st.sidebar.markdown("**Fonte padrão:** GitHub (raw CSV) — você pode carregar outro CSV abaixo.")
+uploaded = st.sidebar.file_uploader("Carregue um CSV (opcional)", type=["csv"])
+use_url = st.sidebar.text_input("Ou cole URL raw CSV (opcional)", value=DEFAULT_CSV)
 
-if use_pdf_refs:
-    st.sidebar.markdown(f"Fonte (PDF): `{PDF_SOURCE_1}`")
-    st.sidebar.markdown(f"Fonte (PDF): `{PDF_SOURCE_2}`")
+# choose source
+source = uploaded if uploaded is not None else use_url
+df_raw = read_csv(source)
+if df_raw.empty:
+    st.warning("CSV vazio ou inválido. Verifique o arquivo/URL e recarregue.")
+    st.stop()
 
-if upload is not None:
-    df = safe_read_csv(upload)
-else:
-    df = safe_read_csv(DEFAULT_CSV)
+df = normalize(df_raw)
 
-if df.empty:
-    st.warning("Dataset vazio — faça o upload de um CSV válido ou coloque o CSV em data/capitais_clean.csv")
-
-# PREPARE
-df = normalize_and_prepare(df)
-
-# Basic columns detection
+# quick col detection
 cols = df.columns.tolist()
 has_geo = ('lat' in cols and 'lon' in cols)
 has_rota = 'rota' in cols or ('origem' in cols and 'destino' in cols)
 
-# -------------------------
-# FILTERS
+# Filters
+st.sidebar.markdown("---")
 st.sidebar.header("Filtros rápidos")
-if 'ano' in df.columns:
-    anos = sorted(df['ano'].dropna().unique().tolist())
-else:
-    anos = sorted(pd.DatetimeIndex(df['data']).year.unique().tolist()) if 'data' in df.columns else []
-
-selected_anos = st.sidebar.multiselect('Ano', options=anos, default=anos if anos else None)
-selected_comp = st.sidebar.multiselect('Companhia', options=sorted(df['companhia'].dropna().unique().tolist()) if 'companhia' in df.columns else [], default=None)
-selected_mes = st.sidebar.multiselect('Mês', options=sorted(df['mes'].dropna().unique().tolist()) if 'mes' in df.columns else list(range(1,13)), default=None)
+anos = sorted(df['ano'].dropna().unique().tolist()) if 'ano' in df.columns else []
+selected_anos = st.sidebar.multiselect("Ano", options=anos, default=anos if anos else None)
+selected_comp = st.sidebar.multiselect("Companhia", options=sorted(df['companhia'].dropna().unique().tolist()) if 'companhia' in df.columns else [], default=None)
+selected_mes = st.sidebar.multiselect("Mês", options=sorted(df['mes'].dropna().unique().tolist()) if 'mes' in df.columns else list(range(1,13)), default=None)
 
 # apply filters
 df_f = df.copy()
@@ -130,150 +103,239 @@ if selected_mes:
     elif 'data' in df_f.columns:
         df_f = df_f[df_f['data'].dt.month.isin(selected_mes)]
 
-st.title('Bora Alí — Capitais (Perfeito)')
+# -------------------------
+# HEADER & KPIs
+st.markdown("<h1 style='margin:0'>✈️ Bora Alí — Capitais</h1>", unsafe_allow_html=True)
+st.markdown("Dashboard interativo • filtros à esquerda • mapas e insights abaixo")
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Registros (filtrados)", f"{len(df_f):,}")
+k2.metric("Tarifa média (R$)", f"{df_f['tarifa'].mean():.2f}" if 'tarifa' in df_f.columns and not df_f['tarifa'].isnull().all() else "—")
+k3.metric("Temp média (°C)", f"{df_f['temp_media'].mean():.1f}" if 'temp_media' in df_f.columns and not df_f['temp_media'].isnull().all() else "—")
+k4.metric("Rotas únicas", df_f['rota'].nunique() if 'rota' in df_f.columns else (df_f.groupby(['origem','destino']).ngroups if ('origem' in df_f.columns and 'destino' in df_f.columns) else "—"))
 
 # -------------------------
-# INSIGHTS: KPI top row
-st.subheader('KPIs')
-k1, k2, k3, k4 = st.columns(4)
-k1.metric('Registros (filtrados)', f"{len(df_f):,}")
-if 'tarifa' in df_f.columns and not df_f['tarifa'].isnull().all():
-    k2.metric('Tarifa média (R$)', f"{df_f['tarifa'].mean():.2f}")
+# INSIGHTS (cards)
+st.markdown("### Insights automáticos")
+col_a, col_b, col_c = st.columns(3)
+
+# top rota
+if 'rota' in df_f.columns:
+    top_rota = df_f['rota'].value_counts().idxmax()
+    top_rota_count = df_f['rota'].value_counts().max()
+    col_a.info(f"**Rota mais frequente:** {top_rota} ({top_rota_count} registros)")
 else:
-    k2.metric('Tarifa média (R$)', '—')
-if 'temp_media' in df_f.columns and not df_f['temp_media'].isnull().all():
-    k3.metric('Temp média (°C)', f"{df_f['temp_media'].mean():.1f}")
+    col_a.info("Rota mais frequente: —")
+
+# rota mais cara (média)
+if 'rota' in df_f.columns and 'tarifa' in df_f.columns:
+    rota_mais_cara = df_f.groupby('rota')['tarifa'].mean().idxmax()
+    col_b.info(f"**Rota mais cara (média):** {rota_mais_cara}")
 else:
-    k3.metric('Temp média (°C)', '—')
-k4.metric('Rotas únicas', df_f['rota'].nunique() if 'rota' in df_f.columns else df_f.groupby(['origem','destino']).ngroups if ('origem' in df_f.columns and 'destino' in df_f.columns) else '—')
+    col_b.info("Rota mais cara: —")
 
-# We'll create >=7 interactive visuals below and label cada um
-
-# 1) MAP: pontos das capitais (hover somente tarifa/temp_media)
-st.markdown('## 1 — Mapa de capitais (hover limpo: tarifa / temp_media)')
-if has_geo:
-    points = df_f.dropna(subset=['lat','lon']).groupby('destino').agg(
-        tarifa=('tarifa','mean'), temp_media=('temp_media','mean'), lat=('lat','first'), lon=('lon','first'), registros=('tarifa','count')
-    ).reset_index()
-
-    fig_map = px.scatter_mapbox(points, lat='lat', lon='lon', size='registros', size_max=18, zoom=4, height=520, mapbox_style='open-street-map')
-    fig_map.update_traces(customdata=np.stack([points['destino'], points['tarifa'], points['temp_media']], axis=-1))
-    fig_map.update_traces(hovertemplate=hover_template_destino())
-    fig_map.update_layout(margin=dict(l=0,r=0,t=0,b=0))
-    st.plotly_chart(fig_map, use_container_width=True)
+# origem mais movimentada
+if 'origem' in df_f.columns:
+    origem_top = df_f['origem'].value_counts().idxmax()
+    col_c.info(f"**Origem mais movimentada:** {origem_top}")
 else:
-    st.info('Sem coordenadas (lat/lon). Faça o upload com colunas lat e lon para visualizar o mapa.')
+    col_c.info("Origem mais movimentada: —")
 
-# 2) MAP + Rotas: top N rotas com linhas suaves (hover mostra tarifa média + freq) 
-st.markdown('## 2 — Mapa de rotas (top rotas)')
-if has_geo and has_rota:
-    top_n = st.slider('Top N rotas', 5, 50, 12, key='topn')
-    route_counts = df_f['rota'].value_counts().reset_index()
-    route_counts.columns = ['rota','freq']
-    top_routes = route_counts.head(top_n)['rota'].tolist()
-    df_routes = df_f[df_f['rota'].isin(top_routes)]
-
-    # ensure points mapping exists
-    points_map = None
-    if 'destino' in df_f.columns and 'lat' in df_f.columns:
-        points_map = df_f.dropna(subset=['lat','lon']).groupby('destino').agg(lat=('lat','first'), lon=('lon','first')).reset_index()
-
-    fig_routes = px.scatter_mapbox(points_map, lat='lat', lon='lon', zoom=4, height=520, mapbox_style='open-street-map') if points_map is not None else go.Figure()
-    # add points as invisible (only to set map center if no points)
-    if points_map is not None and not points_map.empty:
-        fig_routes.update_traces(marker=dict(size=8), selector=dict(mode='markers'))
-
-    for rota in top_routes:
-        try:
-            orig, dest = [p.strip() for p in rota.split('-')]
-        except Exception:
-            continue
-        o = points_map[points_map['destino'].str.lower()==orig.lower()] if points_map is not None else pd.DataFrame()
-        d = points_map[points_map['destino'].str.lower()==dest.lower()] if points_map is not None else pd.DataFrame()
-        if o.empty or d.empty:
-            continue
-        olat, olon = float(o['lat'].iloc[0]), float(o['lon'].iloc[0])
-        dlat, dlon = float(d['lat'].iloc[0]), float(d['lon'].iloc[0])
-        lats, lons = smooth_line(olat, olon, dlat, dlon, points=12)
-        freq = int(df_routes[df_routes['rota']==rota].shape[0])
-        tarifa_media = df_f[df_f['rota']==rota]['tarifa'].mean()
-        fig_routes.add_trace(go.Scattermapbox(lat=lats, lon=lons, mode='lines', line=dict(width=2+np.log1p(freq)*2), hoverinfo='text', text=f"{rota} — Tarifa média: R$ {tarifa_media:.2f} — Freq: {freq}", showlegend=False))
-    fig_routes.update_layout(margin=dict(l=0,r=0,t=0,b=0))
-    st.plotly_chart(fig_routes, use_container_width=True)
+col_d, col_e, col_f = st.columns(3)
+# destino mais barato
+if 'destino' in df_f.columns and 'tarifa' in df_f.columns:
+    destino_barato = df_f.groupby('destino')['tarifa'].mean().idxmin()
+    col_d.info(f"**Destino mais barato (média):** {destino_barato}")
 else:
-    st.info('Para visualizar rotas você precisa de lat/lon e coluna rota (ou origem/destino).')
+    col_d.info("Destino mais barato: —")
 
-# 3) Top rotas: barras interativas (tarifa média e freq)
-st.markdown('## 3 — Top rotas (barras: frequência e tarifa média)')
+# mês com pico
+if 'mes' in df_f.columns and 'tarifa' in df_f.columns:
+    mes_pico = int(df_f.groupby('mes')['tarifa'].mean().idxmax())
+    col_e.info(f"**Mês com pico de tarifa (média):** {mes_pico}")
+else:
+    col_e.info("Mês com pico: —")
+
+# variação ano anterior (simples)
+def pct_vs_prev_year(df_all, df_current):
+    if 'ano' in df_all.columns and 'ano' in df_current.columns:
+        years = sorted(df_current['ano'].dropna().unique().tolist())
+        prev_years = [y-1 for y in years]
+        prev = df_all[df_all['ano'].isin(prev_years)]
+        if prev.empty or df_current.empty:
+            return None
+        return (df_current['tarifa'].mean() - prev['tarifa'].mean()) / prev['tarifa'].mean()
+    return None
+
+change = pct_vs_prev_year(df, df_f)
+col_f.metric("Variação vs ano anterior", f"{change*100:+.1f}%" if change is not None else "—")
+
+# -------------------------
+# MAP: pydeck interactive (left) + rota selector (right)
+left, right = st.columns([2,1])
+
+with left:
+    st.markdown("## Mapa interativo — capitais")
+    if has_geo:
+        # build GeoJSON-like features for pydeck; hide lat/lon in tooltip by using properties
+        points = df_f.dropna(subset=['lat','lon']).groupby('destino').agg(
+            tarifa=('tarifa','mean'), temp_media=('temp_media','mean'),
+            lat=('lat','first'), lon=('lon','first'), registros=('tarifa','count')
+        ).reset_index()
+        if points.empty:
+            st.info("Sem pontos com lat/lon no dataset filtrado.")
+        else:
+            # create pydeck datasource
+            features = []
+            for _, r in points.iterrows():
+                features.append({
+                    "type":"Feature",
+                    "geometry":{"type":"Point","coordinates":[r['lon'], r['lat']]},
+                    "properties":{"name": r['destino'], "tarifa": float(r['tarifa']) if not pd.isna(r['tarifa']) else None, "temp_media": float(r['temp_media']) if not pd.isna(r['temp_media']) else None, "registros": int(r['registros'])}
+                })
+            geojson = {"type":"FeatureCollection", "features": features}
+            # deck layer
+            layer = pdk.Layer(
+                "GeoJsonLayer",
+                geojson,
+                pickable=True,
+                stroked=False,
+                filled=True,
+                point_radius_min_pixels=5,
+                get_fill_color="[255 - properties.registros*2, 100, properties.registros*2, 180]",
+                get_radius="properties.registros * 300",
+            )
+            # tooltip: only show tarifa/temp_media and name
+            tooltip = {"html": "<b>{name}</b><br>Tarifa média: R$ {tarifa:.2f}<br>Temp média: {temp_media:.1f}°C", "style": {"color":"#000"}}
+            view_state = pdk.ViewState(latitude=points['lat'].mean(), longitude=points['lon'].mean(), zoom=4)
+            r = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip)
+            st.pydeck_chart(r)
+    else:
+        st.info("Sem lat/lon — carregue dados com colunas 'lat' e 'lon' para usar o mapa.")
+
+with right:
+    st.markdown("### Rotas — destaque")
+    if has_rota and has_geo:
+        top_n = st.slider("Top N rotas", 5, 40, 12)
+        route_counts = df_f['rota'].value_counts().reset_index()
+        route_counts.columns = ['rota','freq']
+        top_routes = route_counts.head(top_n)['rota'].tolist()
+        sel = st.selectbox("Selecione rota", options=["Nenhuma"] + top_routes)
+        if sel != "Nenhuma":
+            points_map = df_f.dropna(subset=['lat','lon']).groupby('destino').agg(lat=('lat','first'), lon=('lon','first')).reset_index()
+            try:
+                o,d = [p.strip() for p in sel.split('-')]
+                orow = points_map[points_map['destino'].str.lower()==o.lower()]
+                drow = points_map[points_map['destino'].str.lower()==d.lower()]
+                if not orow.empty and not drow.empty:
+                    olat, olon = float(orow['lat'].iloc[0]), float(orow['lon'].iloc[0])
+                    dlat, dlon = float(drow['lat'].iloc[0]), float(drow['lon'].iloc[0])
+                    # show small map with line (plotly)
+                    lats = np.linspace(olat, dlat, 20)
+                    lons = np.linspace(olon, dlon, 20)
+                    fig = go.Figure()
+                    fig.add_trace(go.Scattermapbox(lat=lats, lon=lons, mode='lines+markers', line=dict(width=3), marker=dict(size=6), hoverinfo='none'))
+                    fig.update_layout(mapbox_style='open-street-map', mapbox=dict(center=dict(lat=(olat+dlat)/2, lon=(olon+dlon)/2), zoom=4), margin=dict(l=0,r=0,t=0,b=0), height=360)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Coordenadas não encontradas para origem/destino.")
+            except Exception:
+                st.info("Formato de rota inesperado.")
+    else:
+        st.info("Para destacar rotas, é preciso coluna 'rota' e colunas 'lat'/'lon'.")
+
+# -------------------------
+# GRÁFICOS: top rotas, série temporal, boxplot, heatmap, histograma, small multiples
+st.markdown("## Análises detalhadas")
+
+# top rotas bar
+st.markdown("### Top rotas")
 if 'rota' in df_f.columns:
     top_table = df_f.groupby('rota').agg(freq=('rota','count'), tarifa_media=('tarifa','mean')).reset_index().sort_values('freq', ascending=False).head(20)
-    fig_bar = px.bar(top_table, x='freq', y='rota', orientation='h', text='tarifa_media', height=600)
-    fig_bar.update_layout(yaxis={'categoryorder':'total ascending'}, margin=dict(l=200))
-    fig_bar.update_traces(hovertemplate='Rota: %{y}<br>Freq: %{x}<br>Tarifa média: R$ %{customdata[0]:.2f}<extra></extra>', customdata=np.stack([top_table['tarifa_media']], axis=-1))
-    st.plotly_chart(fig_bar, use_container_width=True)
+    fig = px.bar(top_table, x='freq', y='rota', orientation='h', text='tarifa_media', height=520)
+    fig.update_traces(hovertemplate='Rota: %{y}<br>Freq: %{x}<br>Tarifa média: R$ %{customdata[0]:.2f}', customdata=np.stack([top_table['tarifa_media']], axis=-1))
+    st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info('Coluna rota ausente — verifique.')
+    st.info("Sem coluna 'rota'")
 
-# 4) Série temporal: tarifa média ao longo do tempo (mensal)
-st.markdown('## 4 — Série temporal: tarifa média (mensal)')
+# time series tarifa
+st.markdown("### Tarifa média — Série temporal (mensal)")
 if 'data' in df_f.columns:
     ts = df_f.set_index('data').resample('M').agg(tarifa_media=('tarifa','mean')).reset_index()
-    fig_ts = px.line(ts, x='data', y='tarifa_media', markers=True, height=400)
-    fig_ts.update_layout(xaxis_title='Data', yaxis_title='Tarifa média (R$)', margin=dict(l=20,r=20,t=20,b=20))
-    st.plotly_chart(fig_ts, use_container_width=True)
+    fig = px.line(ts, x='data', y='tarifa_media', markers=True)
+    st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info('Sem coluna data para série temporal.')
+    st.info("Sem coluna 'data' para série temporal.")
 
-# 5) Boxplot por companhia (distribuição de tarifas)
-st.markdown('## 5 — Boxplot: tarifa por companhia')
+# boxplot companhia
+st.markdown("### Boxplot: tarifa por companhia")
 if 'companhia' in df_f.columns:
-    # take top companies
-    top_comp = df_f['companhia'].value_counts().head(10).index.tolist()
+    top_comp = df_f['companhia'].value_counts().head(8).index.tolist()
     df_comp = df_f[df_f['companhia'].isin(top_comp)]
-    fig_box = px.box(df_comp, x='companhia', y='tarifa', points='all', height=450)
-    fig_box.update_traces(hovertemplate='Companhia: %{x}<br>Tarifa: R$ %{y:.2f}<extra></extra>')
-    st.plotly_chart(fig_box, use_container_width=True)
+    fig = px.box(df_comp, x='companhia', y='tarifa', points='all', height=420)
+    st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info('Coluna companhia ausente.')
+    st.info("Sem coluna 'companhia'")
 
-# 6) Heatmap: média tarifa por mês x origem (pivot)
-st.markdown('## 6 — Heatmap: tarifa média por mês x origem (ou destino)')
+# heatmap
+st.markdown("### Heatmap: tarifa média por mês x origem")
 if 'mes' in df_f.columns and 'origem' in df_f.columns:
     pivot = df_f.groupby(['mes','origem']).agg(tarifa_media=('tarifa','mean')).reset_index()
     heat = pivot.pivot(index='origem', columns='mes', values='tarifa_media').fillna(0)
-    fig_heat = px.imshow(heat, labels=dict(x='Mês', y='Origem', color='Tarifa média (R$)'), aspect='auto', height=600)
-    st.plotly_chart(fig_heat, use_container_width=True)
+    fig = px.imshow(heat, labels=dict(x='Mês', y='Origem', color='Tarifa média (R$)'), aspect='auto', height=520)
+    st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info('Dados insuficientes para heatmap (mes/origem).')
+    st.info("Dados insuficientes (mes/origem)")
 
-# 7) Distribuição + histogram + KDE (tarifa)
-st.markdown('## 7 — Distribuição de tarifas (histograma interativo)')
+# histograma
+st.markdown("### Distribuição de tarifas")
 if 'tarifa' in df_f.columns:
-    fig_hist = px.histogram(df_f, x='tarifa', nbins=40, marginal='box', height=420)
-    fig_hist.update_layout(xaxis_title='Tarifa (R$)', yaxis_title='Contagem')
-    st.plotly_chart(fig_hist, use_container_width=True)
+    fig = px.histogram(df_f, x='tarifa', nbins=40, marginal='box', height=360)
+    st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info('Coluna tarifa ausente.')
+    st.info("Sem tarifa")
 
-# 8) Small multiples (opcional) — tarifa média por mês por companhia
-st.markdown('## 8 — Small multiples: tarifa média por mês por companhia (top 6)')
+# small multiples
+st.markdown("### Small multiples — tarifa média por mês por companhia")
 if 'companhia' in df_f.columns and 'mes' in df_f.columns:
     comps = df_f['companhia'].value_counts().head(6).index.tolist()
     df_small = df_f[df_f['companhia'].isin(comps)].groupby(['companhia','mes']).agg(tarifa_media=('tarifa','mean')).reset_index()
-    fig_small = px.line(df_small, x='mes', y='tarifa_media', color='companhia', facet_col='companhia', facet_col_wrap=3, markers=True, height=700)
-    st.plotly_chart(fig_small, use_container_width=True)
+    fig = px.line(df_small, x='mes', y='tarifa_media', color='companhia', facet_col='companhia', facet_col_wrap=3, markers=True, height=520)
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Sem companhia/mes para small multiples")
 
 # -------------------------
-# EXPORT / DOWNLOAD
-st.sidebar.header('Exportar')
-if st.sidebar.button('Download: relatório (CSV filtrado)'):
+# FORECAST (Prophet) — previsão simples de tarifa média mensal
+st.markdown("## Previsão rápida: tarifa média (Prophet)")
+if 'data' in df_f.columns and 'tarifa' in df_f.columns and len(df_f)>=24:
+    # prepare monthly series
+    monthly = df_f.set_index('data').resample('M').agg(tarifa_media=('tarifa','mean')).reset_index().dropna()
+    monthly = monthly.rename(columns={'data':'ds','tarifa_media':'y'})
+    try:
+        m = Prophet(yearly_seasonality=True, daily_seasonality=False, weekly_seasonality=False)
+        m.fit(monthly)
+        future = m.make_future_dataframe(periods=6, freq='M')
+        forecast = m.predict(future)
+        fig = plot_plotly(m, forecast)
+        st.plotly_chart(fig, use_container_width=True)
+        last = forecast[['ds','yhat']].tail(6)
+        st.table(last.assign(ds=lambda df: df['ds'].dt.strftime('%Y-%m')))
+    except Exception as e:
+        st.info(f"Erro no Prophet: {e}")
+else:
+    st.info("Previsão precisa de coluna 'data' e 'tarifa' e pelo menos ~24 registros.")
+
+# -------------------------
+# EXPORT
+st.sidebar.markdown("---")
+st.sidebar.header("Exportar")
+if st.sidebar.button("Baixar CSV filtrado"):
     csv = df_f.to_csv(index=False).encode('utf-8')
-    st.sidebar.download_button('Clique para baixar CSV filtrado', data=csv, file_name='capitais_filtrado.csv', mime='text/csv')
+    st.sidebar.download_button("Download CSV", data=csv, file_name="capitais_filtrado.csv", mime="text/csv")
 
-st.sidebar.markdown('---')
-st.sidebar.write('Para suporte e ajustes adicionais - posso adaptar o código ao seu CSV real e criar um mapping IATA->coord se precisar.')
+st.sidebar.markdown("Deploy: push no GitHub e conecte em share.streamlit.io")
 
-# final note
-st.caption('Aplicativo gerado automaticamente — personalize caminhos e mapeamentos IATA conforme necessário.')
+st.caption("Versão com pydeck e Prophet — ajuste DEFAULT_CSV para outro raw URL se necessário.")
 
 
