@@ -1,291 +1,314 @@
+# app.py — Bora Alí (capitais) — Versão final pronta para GitHub / Streamlit Cloud
+# Requisitos: pandas, streamlit, plotly, pydeck, prophet, python-pptx, numpy
 
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
-import unicodedata
+import pydeck as pdk
+from prophet import Prophet
+from prophet.plot import plot_plotly
+from datetime import datetime
 
-st.set_page_config(page_title="Bora Alí — Dashboard (Capitais)", layout="wide", initial_sidebar_state="expanded")
+# -----------------------------
+# PATHS — ajustar apenas se quiser (por padrão espera data/ no repo)
+DATA_PATH = "data/INMET_ANAC_ROTAS_APENAS_CAPITAIS.csv"
+OUTPUT_PATH = "outputs"
+os.makedirs(OUTPUT_PATH, exist_ok=True)
 
-# ---------------- utilitários ----------------
-def normaliza(texto):
-    """Normaliza string (remove acentos, lower, strip)."""
-    if pd.isna(texto):
-        return ""
-    s = str(texto).strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    return "".join([c for c in s if not unicodedata.combining(c)])
+# -----------------------------
+# Branding — Azul + Coral (limpo, jovem, profissional)
+PRIMARY = "#006DCE"
+ACCENT = "#FF6B4A"
+BG = "#F7F9FB"
+TEXT = "#0F172A"
 
-def parse_rota(rota_str):
-    """Tenta extrair origem e destino a partir da string da rota."""
-    if pd.isna(rota_str):
-        return None, None
-    s = str(rota_str)
-    delims = [" - ", "–", "--", ">", "→", "/", "|", " / ", "-"]
-    for d in delims:
-        if d in s:
-            parts = [p.strip() for p in s.split(d) if p.strip()]
-            if len(parts) >= 2:
-                return parts[0], parts[-1]
-    parts = s.split()
-    if len(parts) == 2:
-        return parts[0], parts[1]
-    return None, None
+st.set_page_config(page_title="Bora Alí — Capitais", layout="wide", initial_sidebar_state="expanded")
 
-# ---------------- Dicionário de coordenadas das 27 capitais brasileiras ----------------
-# Chaves em formato normalizado (sem acento, minúsculo)
-capitais_coords = {
-    "sao paulo": (-23.55052, -46.633308),
-    "rio de janeiro": (-22.906847, -43.172896),
-    "brasilia": (-15.826691, -47.921822),
-    "salvador": (-12.977749, -38.501629),
-    "belo horizonte": (-19.920683, -43.937148),
-    "curitiba": (-25.428954, -49.267137),
-    "porto alegre": (-30.027708, -51.228734),
-    "recife": (-8.047562, -34.877),
-    "fortaleza": (-3.71722, -38.5434),
-    "manaus": (-3.10194, -60.025),
-    "belem": (-1.455754, -48.490179),
-    "goiania": (-16.686891, -49.264788),
-    "maceio": (-9.66599, -35.735),
-    "natal": (-5.79448, -35.211),
-    "joao pessoa": (-7.119495, -34.845011),
-    "aracaju": (-10.947247, -37.073082),
-    "teresina": (-5.091944, -42.80339),
-    "palmas": (-10.1849, -48.3336),
-    "cuiaba": (-15.601417, -56.09789),
-    "campo grande": (-20.44278, -54.6469),
-    "vitoria": (-20.3155, -40.3128),
-    "florianopolis": (-27.5969, -48.5495),
-    "sao luis": (-2.52972, -44.30278),
-    "macapa": (0.034934, -51.069389),
-    "boa vista": (2.819444, -60.673333),
-    "rio branco": (-9.97499, -67.8243),
-    "palmas": (-10.1849, -48.3336),
-    "manaus": (-3.10194, -60.025)
+st.markdown(f"""
+<style>
+body {{background-color: {BG};}}
+h1 {{color: {PRIMARY}; font-weight:800;}}
+h2,h3 {{color: {TEXT};}}
+.stButton>button {{background-color:{PRIMARY}; color:white; border-radius:8px;}}
+.card {{border-radius:10px; padding:12px; box-shadow: 0 8px 24px rgba(15,23,42,0.06); background:white}}
+.small-muted {{color:#6b7280; font-size:13px}}
+.legend-bora {{font-weight:600; color:{TEXT}}}
+</style>
+""", unsafe_allow_html=True)
+
+# -----------------------------
+# Helper: Lista completa de capitais do Brasil
+CAPITAIS = {
+    'Rio Branco': (-9.97499, -67.8243),
+    'Maceió': (-9.649847, -35.70895),
+    'Macapá': (0.034934, -51.0694),
+    'Manaus': (-3.119028, -60.021731),
+    'Salvador': (-12.97139, -38.50139),
+    'Fortaleza': (-3.71722, -38.543366),
+    'Brasília': (-15.793889, -47.882778),
+    'Vitória': (-20.3155, -40.3128),
+    'Goiânia': (-16.686891, -49.264788),
+    'São Luís': (-2.52972, -44.30278),
+    'Cuiabá': (-15.601415, -56.097892),
+    'Campo Grande': (-20.4433, -54.6465),
+    'Belo Horizonte': (-19.916681, -43.934493),
+    'Belém': (-1.455833, -48.504444),
+    'João Pessoa': (-7.119495, -34.845011),
+    'Curitiba': (-25.429596, -49.271272),
+    'Recife': (-8.047562, -34.8770),
+    'Teresina': (-5.08921, -42.8016),
+    'Rio de Janeiro': (-22.906847, -43.172896),
+    'Natal': (-5.795, -35.209),
+    'Porto Alegre': (-30.034647, -51.217658),
+    'Porto Velho': (-8.7608, -63.9039),
+    'Boa Vista': (2.8196, -60.6733),
+    'Florianópolis': (-27.595377, -48.548046),
+    'Aracaju': (-10.9472, -37.0731),
+    'São Paulo': (-23.55052, -46.633308),
+    'Palmas': (-10.184, -48.333),
+    # (se faltar alguma capital no seu CSV, ajuste o nome para bater com DEST/ROTA)
 }
 
-def obter_coords(cidade):
-    k = normaliza(cidade)
-    return capitais_coords.get(k, (None, None))
-
-# ---------------- Carregar dados ----------------
-@st.cache_data
-def carregar_dados():
-    # lê CSVs (assume que estão no mesmo repositório)
-    df = pd.read_csv("INMET_ANAC_ROTAS_APENAS_CAPITAIS.csv", low_memory=False)
-    ipca = pd.read_csv("IPCAUNIFICADO.csv", low_memory=False)
-    # padroniza nomes de coluna caso venham em formatos diferentes (minúsculas/maiúsculas)
-    col_map = {}
-    for c in df.columns:
-        col_map[c] = c.strip()
-    df.rename(columns=col_map, inplace=True)
-    # garantir colunas esperadas existam (caso sensível)
-    for c in ["COMPANHIA","ANO","MES","DESTINO","ROTA","TARIFA","TEMP_MEDIA"]:
+# -----------------------------
+# Load data
+@st.cache_data(ttl=900)
+def load_data(path):
+    df = pd.read_csv(path, low_memory=False)
+    # padroniza colunas esperadas
+    for c in ["COMPANHIA","ROTA","DESTINO","ORIGEM","TARIFA","TEMP_MEDIA","ANO","MES"]:
         if c not in df.columns:
-            df[c] = np.nan
-    # converter tipos
-    df["ANO"] = pd.to_numeric(df["ANO"], errors="coerce").astype("Int64")
-    df["MES"] = pd.to_numeric(df["MES"], errors="coerce").astype("Int64")
-    # adicionar colunas de lat/lon a partir de DESTINO
-    lats, lons, lats_o, lons_o = [], [], [], []
-    for _, row in df.iterrows():
-        dest = row.get("DESTINO")
-        lat, lon = obter_coords(dest)
-        lats.append(lat)
-        lons.append(lon)
-        # tentar extrair origem da coluna ROTA
-        origem, destino_parsed = parse_rota(row.get("ROTA"))
-        if origem:
-            lat_o, lon_o = obter_coords(origem)
-        else:
-            lat_o, lon_o = (None, None)
-        lats_o.append(lat_o)
-        lons_o.append(lon_o)
-    df["LAT"] = lats
-    df["LON"] = lons
-    df["LAT_ORIGEM"] = lats_o
-    df["LON_ORIGEM"] = lons_o
-    return df, ipca
+            df[c] = pd.NA
+    # limpeza rápida
+    df['ROTA'] = df['ROTA'].astype(str).str.replace(' - ', ' → ').str.strip()
+    df['COMPANHIA'] = df['COMPANHIA'].astype(str).str.upper().str.strip()
+    df['TARIFA'] = pd.to_numeric(df['TARIFA'], errors='coerce')
+    df['TEMP_MEDIA'] = pd.to_numeric(df['TEMP_MEDIA'], errors='coerce')
+    df['ANO'] = pd.to_numeric(df['ANO'], errors='coerce').fillna(0).astype(int)
+    df['MES'] = pd.to_numeric(df['MES'], errors='coerce').fillna(0).astype(int)
+    df['DATA'] = pd.to_datetime(df['ANO'].astype(str) + "-" + df['MES'].astype(str).str.zfill(2) + "-01", errors='coerce')
+    return df
 
-df, ipca = carregar_dados()
+try:
+    df = load_data(DATA_PATH)
+except FileNotFoundError:
+    st.error("Arquivo não encontrado: coloque INMET_ANAC_ROTAS_APENAS_CAPITAIS.csv em /data/ no repositório.")
+    st.stop()
 
-# ---------------- Sidebar (filtros) ----------------
-st.sidebar.title("Filtros")
-st.sidebar.markdown("Filtre os dados para explorar capitais, períodos e companhias.")
+# -----------------------------
+# Sidebar — filtros essenciais (limpo)
+st.sidebar.header("Filtros — Bora Alí")
+anos = sorted(df['ANO'].dropna().unique())
+sel_anos = st.sidebar.multiselect("Ano", anos, default=anos if anos else [])
+sel_meses = st.sidebar.multiselect("Mês", list(range(1,13)), default=list(range(1,13)))
+companias = sorted(df['COMPANHIA'].dropna().unique())
+sel_comp = st.sidebar.multiselect("Companhia", companias, default=companias if companias else [])
+# capitais para focar (orig/dest)
+cap_options = sorted(list(CAPITAIS.keys()))
+sel_caps = st.sidebar.multiselect("Capitais (origem/destino)", cap_options, default=['São Paulo','Rio de Janeiro','Recife','Brasília','Manaus'])
 
-anos_disponiveis = sorted([int(x) for x in df["ANO"].dropna().unique()]) if df["ANO"].notna().any() else []
-meses_disponiveis = sorted([int(x) for x in df["MES"].dropna().unique()]) if df["MES"].notna().any() else []
-capitais_disponiveis = sorted(df["DESTINO"].dropna().unique().tolist())
-companhias_disponiveis = sorted(df["COMPANHIA"].dropna().unique().tolist())
-
-sel_anos = st.sidebar.multiselect("Ano", anos_disponiveis, default=anos_disponiveis)
-sel_meses = st.sidebar.multiselect("Mês", meses_disponiveis, default=meses_disponiveis)
-sel_capitais = st.sidebar.multiselect("Capital (DESTINO)", capitais_disponiveis, default=capitais_disponiveis[:6])
-sel_companhias = st.sidebar.multiselect("Companhia", companhias_disponiveis, default=companhias_disponiveis)
-
-# aplicar filtros
-filtro = df.copy()
+# quick filter application
+dff = df.copy()
 if sel_anos:
-    filtro = filtro[filtro["ANO"].isin(sel_anos)]
+    dff = dff[dff['ANO'].isin(sel_anos)]
 if sel_meses:
-    filtro = filtro[filtro["MES"].isin(sel_meses)]
-if sel_capitais:
-    filtro = filtro[filtro["DESTINO"].isin(sel_capitais)]
-if sel_companhias:
-    filtro = filtro[filtro["COMPANHIA"].isin(sel_companhias)]
+    dff = dff[dff['MES'].isin(sel_meses)]
+if sel_comp:
+    dff = dff[dff['COMPANHIA'].isin(sel_comp)]
 
-# ---------------- Layout principal ----------------
-st.title("🚀 Bora Alí — Painel de Controle (Capitais)")
-st.markdown("Painel interativo com mapas, rotas e análises por companhia. Ideal para apresentações SR2.")
+# parse ROTA into origin/dest (robusto)
+def parse_rota(rt):
+    if pd.isna(rt): return (None,None)
+    if '→' in rt:
+        parts = [p.strip() for p in rt.split('→') if p.strip()]
+        if len(parts) >= 2: return parts[0], parts[-1]
+    # fallback: try dash
+    if '-' in rt:
+        parts = [p.strip() for p in rt.split('-') if p.strip()]
+        if len(parts) >= 2: return parts[0], parts[-1]
+    return (None,None)
 
-# KPIs
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Registros (filtrados)", f"{filtro.shape[0]:,}")
-k2.metric("Tarifa média (R$)", f"{round(filtro['TARIFA'].mean(),2) if filtro['TARIFA'].notna().any() else '—'}")
-k3.metric("Temperatura média (°C)", f"{round(filtro['TEMP_MEDIA'].mean(),2) if filtro['TEMP_MEDIA'].notna().any() else '—'}")
-k4.metric("Rotas únicas", f"{int(filtro['ROTA'].nunique()) if 'ROTA' in filtro.columns else '—'}")
+parsed = dff['ROTA'].apply(lambda r: pd.Series(parse_rota(r), index=['ORIG_ROTA','DEST_ROTA']))
+dff = pd.concat([dff, parsed], axis=1)
+
+# keep only routes where both origin and dest are capitals and in user selection
+dff = dff[dff['ORIG_ROTA'].isin(sel_caps) & dff['DEST_ROTA'].isin(sel_caps)].copy()
+
+# small guard
+if dff.shape[0] == 0:
+    st.warning("Nenhum registro após filtros. Ajuste Ano/Mês/Companhia/Capitais.")
+    st.stop()
+
+# -----------------------------
+# Aggregate for maps and summaries
+agg_cap = (
+    dff.groupby('DEST_ROTA')
+    .agg(tarifa_media=('TARIFA','mean'), temp_media=('TEMP_MEDIA','mean'), registros=('TARIFA','count'))
+    .reset_index()
+    .rename(columns={'DEST_ROTA':'CAPITAL'})
+)
+agg_cap['lat'] = agg_cap['CAPITAL'].map(lambda x: CAPITAIS.get(x,(np.nan,np.nan))[0])
+agg_cap['lon'] = agg_cap['CAPITAL'].map(lambda x: CAPITAIS.get(x,(np.nan,np.nan))[1])
+
+# prepare routes (unique)
+routes = (
+    dff.groupby(['ORIG_ROTA','DEST_ROTA','ROTA','COMPANHIA'])
+    .agg(tarifa_media=('TARIFA','mean'), registros=('TARIFA','count'))
+    .reset_index()
+)
+routes['olat'] = routes['ORIG_ROTA'].map(lambda x: CAPITAIS.get(x,(np.nan,np.nan))[0])
+routes['olon'] = routes['ORIG_ROTA'].map(lambda x: CAPITAIS.get(x,(np.nan,np.nan))[1])
+routes['dlat'] = routes['DEST_ROTA'].map(lambda x: CAPITAIS.get(x,(np.nan,np.nan))[0])
+routes['dlon'] = routes['DEST_ROTA'].map(lambda x: CAPITAIS.get(x,(np.nan,np.nan))[1])
+routes = routes.dropna(subset=['olat','olon','dlat','dlon']).copy()
+
+# -----------------------------
+# Layout: top metrics + maps
+st.markdown("## Resumo rápido")
+c1, c2, c3, c4 = st.columns([1.5,1.2,1.2,1.2])
+with c1:
+    st.markdown("**Registros (filtrados)**")
+    st.metric("", f"{dff.shape[0]:,}")
+with c2:
+    st.markdown("**Tarifa média (R$)**")
+    st.metric("", f"{dff['TARIFA'].mean():.0f}")
+with c3:
+    st.markdown("**Temperatura média (°C)**")
+    st.metric("", f"{dff['TEMP_MEDIA'].mean():.1f}")
+with c4:
+    st.markdown("**Rotas únicas**")
+    st.metric("", f"{routes['ROTA'].nunique():,}")
 
 st.markdown("---")
 
-# ---------------- Painel: Séries temporais ----------------
-st.header("Séries temporais — Tarifa média")
-if filtro["TARIFA"].notna().any() and filtro["ANO"].notna().any() and filtro["MES"].notna().any():
-    ts = filtro.groupby(["ANO","MES","DESTINO"])["TARIFA"].mean().reset_index()
-    ts["DATA"] = pd.to_datetime(ts["ANO"].astype(str) + "-" + ts["MES"].astype(str) + "-01", errors="coerce")
-    fig_ts = px.line(ts, x="DATA", y="TARIFA", color="DESTINO", markers=True,
-                     title="Tarifa média mensal por capital")
-    fig_ts.update_layout(legend_title_text="Capital")
-    st.plotly_chart(fig_ts, use_container_width=True)
-else:
-    st.info("Dados insuficientes para série temporal (verifique ANO/MES/TARIFA).")
-
-# ---------------- Painel: Tarifa x Temperatura ----------------
-st.header("Tarifa × Temperatura média")
-if filtro["TARIFA"].notna().any() and filtro["TEMP_MEDIA"].notna().any():
-    fig_scatter = px.scatter(filtro, x="TEMP_MEDIA", y="TARIFA", color="COMPANHIA",
-                             hover_data=["DESTINO","ROTA"], trendline="ols",
-                             title="Relação entre temperatura média e tarifa (por companhia)")
-    st.plotly_chart(fig_scatter, use_container_width=True)
-else:
-    st.info("Dados insuficientes para o gráfico Tarifa × Temperatura.")
-
-# ---------------- Painel: Mapa de Capitais (pontos) ----------------
-st.header("Mapa — Capitais (tarifa média por ponto)")
-map_df = filtro.dropna(subset=["LAT","LON"]).groupby("DESTINO").agg(
-    LAT=("LAT","first"), LON=("LON","first"), TARIFA_MEDIA=("TARIFA","mean"), QTDE=("TARIFA","count")
-).reset_index()
-
-if map_df.empty:
-    st.warning("Nenhuma coordenada encontrada para as capitais selecionadas. Verifique os nomes em 'DESTINO'.")
-else:
-    fig_map = px.scatter_mapbox(map_df, lat="LAT", lon="LON",
-                                size="TARIFA_MEDIA", color="TARIFA_MEDIA",
-                                hover_name="DESTINO", hover_data={"TARIFA_MEDIA":":.2f","QTDE":True},
-                                zoom=3, height=520,
-                                title="Tarifa média por capital")
-    fig_map.update_layout(mapbox_style="carto-positron", margin={"r":0,"t":40,"l":0,"b":0})
+left, right = st.columns([1,1])
+with left:
+    st.subheader("Mapa 1 — Capitais: Tarifa (tamanho) × Temperatura (cor)")
+    fig_map = px.scatter_mapbox(
+        agg_cap.dropna(subset=['lat','lon']),
+        lat='lat', lon='lon', size='tarifa_media', color='temp_media',
+        hover_name='CAPITAL', hover_data={'tarifa_media':':.2f','temp_media':':.2f','registros':True},
+        size_max=50, zoom=3.2, color_continuous_scale=px.colors.sequential.thermal
+    )
+    fig_map.update_layout(mapbox_style='carto-positron', margin={'r':0,'t':0,'l':0,'b':0}, paper_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig_map, use_container_width=True)
 
-# ---------------- Painel: Mapa de Rotas (linhas) ----------------
-st.header("Mapa — Rotas entre capitais")
-st.markdown("O app tenta extrair origem/destino a partir da coluna `ROTA` (ex: 'São Paulo - Rio de Janeiro'). Se as rotas estiverem em siglas IATA (ex: 'GRU-GIG'), pode ser necessário fornecer mapeamento IATA → cidade.")
+with right:
+    st.subheader("Mapa 2 — Rotas entre Capitais (linha = rota; largura ≈ tarifa)")
+    # We use pydeck for smooth arcs
+    arc_layer = pdk.Layer(
+        "ArcLayer",
+        data=routes,
+        get_source_position=["olon","olat"],
+        get_target_position=["dlon","dlat"],
+        get_source_color=[6,110,204],
+        get_target_color=[255,107,74],
+        get_width="tarifa_media",
+        pickable=True,
+        auto_highlight=True
+    )
+    view = pdk.ViewState(latitude=-14.2350, longitude=-51.9253, zoom=3.4, pitch=0)
+    r_deck = pdk.Deck(layers=[arc_layer], initial_view_state=view, map_style='mapbox://styles/mapbox/light-v9')
+    st.pydeck_chart(r_deck)
 
-mostrar_rotas = st.checkbox("Mostrar rotas (linhas)", value=True)
-top_n = st.slider("Top N rotas por frequência", 5, 30, 10)
-
-# preparar rotas
-rotas = filtro.copy()
-rotas["ROTA_STR"] = rotas["ROTA"].astype(str)
-rotas_agr = rotas.groupby("ROTA_STR").agg(FREQ=("ROTA_STR","count"), TARIFA_MEDIA=("TARIFA","mean")).reset_index()
-rotas_agr = rotas_agr.sort_values("FREQ", ascending=False).head(top_n)
-
-linhas = []
-for _, r in rotas_agr.iterrows():
-    rota_text = r["ROTA_STR"]
-    origem, destino = parse_rota(rota_text)
-    if origem and destino:
-        lat_o, lon_o = obter_coords(origem)
-        lat_d, lon_d = obter_coords(destino)
-        if None not in (lat_o, lon_o, lat_d, lon_d):
-            linhas.append({
-                "origem": origem, "destino": destino,
-                "lat_o": lat_o, "lon_o": lon_o, "lat_d": lat_d, "lon_d": lon_d,
-                "freq": int(r["FREQ"]), "tarifa_media": float(r["TARIFA_MEDIA"]) if not pd.isna(r["TARIFA_MEDIA"]) else None
-            })
-
-if mostrar_rotas:
-    if linhas:
-        fig = go.Figure()
-        # pontos (capitais)
-        if not map_df.empty:
-            fig.add_trace(go.Scattermapbox(
-                lat=map_df["LAT"], lon=map_df["LON"], mode="markers",
-                marker=go.scattermapbox.Marker(size=8),
-                text=map_df["DESTINO"], hoverinfo="text"
-            ))
-        max_freq = max([ln["freq"] for ln in linhas]) if linhas else 1
-        for ln in linhas:
-            largura = 1 + 4 * (ln["freq"] / max_freq)
-            hovertxt = f"{ln['origem']} → {ln['destino']} | freq: {ln['freq']} | tarifa média: {ln['tarifa_media']:.2f}" if ln['tarifa_media'] else f"{ln['origem']} → {ln['destino']} | freq: {ln['freq']}"
-            fig.add_trace(go.Scattermapbox(
-                lat=[ln["lat_o"], ln["lat_d"]], lon=[ln["lon_o"], ln["lon_d"]],
-                mode="lines", line=dict(width=largura, color="royalblue"), hoverinfo="text", text=hovertxt
-            ))
-        fig.update_layout(mapbox_style="carto-positron", mapbox_center={"lat":-14.2,"lon":-51.9}, mapbox_zoom=3,
-                          margin={"r":0,"t":40,"l":0,"b":0}, height=600)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Não foi possível extrair origens/destinos válidos das rotas. Padronize a coluna `ROTA` ou forneça mapeamento IATA → cidade.")
-
-# ---------------- Painel: Análise por Companhia ----------------
-st.header("Análise por Companhia aérea")
-st.markdown("Compare companhias: tarifa média, número de registros, e série temporal por companhia.")
-
-if filtro["COMPANHIA"].notna().any():
-    comp_tab = filtro.groupby("COMPANHIA").agg(Registros=("COMPANHIA","count"), Tarifa_Media=("TARIFA","mean")).reset_index()
-    comp_tab = comp_tab.sort_values("Registros", ascending=False)
-    st.subheader("Resumo por companhia")
-    st.dataframe(comp_tab.style.format({"Tarifa_Media":"{:.2f}"}))
-
-    # gráfico: tarifa média por companhia
-    st.subheader("Tarifa média por companhia")
-    fig_comp = px.bar(comp_tab, x="COMPANHIA", y="Tarifa_Media", text=comp_tab["Tarifa_Media"].round(2),
-                      title="Tarifa média por companhia (filtradas seleções)", labels={"Tarifa_Media":"Tarifa média (R$)"})
-    fig_comp.update_layout(xaxis_tickangle=-45)
-    st.plotly_chart(fig_comp, use_container_width=True)
-
-    # série temporal por companhia (se houver ANO/MES)
-    st.subheader("Série temporal — Tarifa média por companhia")
-    ts_comp = filtro.groupby(["ANO","MES","COMPANHIA"])["TARIFA"].mean().reset_index()
-    if not ts_comp.empty:
-        ts_comp["DATA"] = pd.to_datetime(ts_comp["ANO"].astype(str) + "-" + ts_comp["MES"].astype(str) + "-01", errors="coerce")
-        fig_ts_comp = px.line(ts_comp, x="DATA", y="TARIFA", color="COMPANHIA", title="Tarifa média ao longo do tempo por companhia", markers=True)
-        st.plotly_chart(fig_ts_comp, use_container_width=True)
-else:
-    st.info("Não foram encontrados registros de companhia no conjunto filtrado.")
-
-# ---------------- Top rotas ----------------
-st.header("Top rotas — frequência e tarifa média")
-if "ROTA" in filtro.columns:
-    top_rotas = filtro.groupby("ROTA").agg(Frequencia=("ROTA","count"), Tarifa_Media=("TARIFA","mean")).reset_index()
-    top_rotas = top_rotas.sort_values("Frequencia", ascending=False).head(20)
-    st.dataframe(top_rotas.style.format({"Tarifa_Media":"{:.2f}"}))
-else:
-    st.info("Coluna `ROTA` ausente no dataset.")
-
-# ---------------- Correlação ----------------
-st.header("Matriz de Correlação")
-corr_cols = [c for c in ["TARIFA","TEMP_MEDIA","MES","ANO"] if c in filtro.columns]
-if len(corr_cols) >= 2:
-    corr = filtro[corr_cols].corr()
-    fig_corr = px.imshow(corr, text_auto=True, title="Correlação entre variáveis selecionadas")
-    st.plotly_chart(fig_corr, use_container_width=True)
-else:
-    st.info("Não há colunas suficientes para calcular correlação.")
-
-# ---------------- Rodapé / instruções ----------------
 st.markdown("---")
-st.caption("Observação: o mapa usa um dicionário interno de coordenadas para as capitais. Se algum ponto não aparecer, verifique o nome exato na coluna DESTINO e me passe para eu adicionar ao dicionário. Se suas rotas usam códigos IATA (ex: 'GRU-GIG'), podemos incluir um mapeamento IATA → capital para desenhar as rotas corretamente.")
+
+# -----------------------------
+# Insights — estações e correlações
+st.subheader("Insights — estações, top rotas e companhias")
+dff['ESTACAO'] = dff['MES'].apply(lambda m: 'Verão' if m in [12,1,2] else ('Outono' if m in [3,4,5] else ('Inverno' if m in [6,7,8] else 'Primavera')))
+
+est = (
+    dff.groupby('ESTACAO')
+    .agg(tarifa_media=('TARIFA','mean'), temp_media=('TEMP_MEDIA','mean'), registros=('TARIFA','count'))
+    .reset_index()
+)
+t1, t2, t3 = st.columns(3)
+with t1:
+    st.markdown("### 🔁 Tarifas por estação")
+    st.table(est.round(2).set_index('ESTACAO'))
+with t2:
+    st.markdown("### 🚩 Top rotas (freq)")
+    top_routes = dff['ROTA'].value_counts().head(8).rename_axis('ROTA').reset_index(name='FREQ')
+    st.table(top_routes)
+with t3:
+    st.markdown("### ✈️ Companhias — média e registros")
+    comp = dff.groupby('COMPANHIA').agg(tarifa_media=('TARIFA','mean'), regs=('TARIFA','count')).reset_index().sort_values('tarifa_media', ascending=False)
+    st.dataframe(comp.head(12).round(2))
+
+st.markdown("---")
+
+# -----------------------------
+# Forecasting — Prophet (model per rota or per capital)
+st.header("Previsão — Tarifas para 2026")
+st.markdown("Escolha uma rota (ou selecione 'AGREGAR POR DESTINO' para modelos por capital). Usamos Prophet com regressor de temperatura para mais precisão.")
+
+agg_mode = st.radio("Modo de forecast:", ("Por Rota", "Por Destino (agregado)"), index=0)
+if agg_mode == "Por Rota":
+    rota_sel = st.selectbox("Selecione rota", sorted(routes['ROTA'].unique()))
+    df_model = dff[dff['ROTA']==rota_sel].groupby('DATA').agg(tarifa=('TARIFA','mean'), temp=('TEMP_MEDIA','mean')).reset_index()
+else:
+    dest_sel = st.selectbox("Selecione destino (capital)", sorted(agg_cap['CAPITAL'].unique()))
+    df_model = dff[dff['DEST_ROTA']==dest_sel].groupby('DATA').agg(tarifa=('TARIFA','mean'), temp=('TEMP_MEDIA','mean')).reset_index()
+
+if df_model.shape[0] < 12:
+    st.warning("Dados insuficientes (menos de 12 meses). Escolha outra rota/destino ou aumente o período de filtro.")
+else:
+    df_prop = df_model.rename(columns={'DATA':'ds','tarifa':'y','temp':'temp_reg'}).dropna(subset=['ds','y'])
+    m = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+    m.add_regressor('temp_reg')
+    with st.spinner("Treinando modelo Prophet (poucos segundos)…"):
+        m.fit(df_prop)
+    future = m.make_future_dataframe(periods=12, freq='MS')
+    # fill future regressor by monthly averages from history (seasonality)
+    df_prop['month'] = df_prop['ds'].dt.month
+    monthly_temp = df_prop.groupby('month')['temp_reg'].mean().to_dict()
+    future['month'] = future['ds'].dt.month
+    future['temp_reg'] = future['month'].map(monthly_temp).fillna(df_prop['temp_reg'].mean())
+    forecast = m.predict(future)
+    # Plot interactive
+    st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
+    # show 2026 table
+    f2026 = forecast[forecast['ds'].dt.year==2026][['ds','yhat','yhat_lower','yhat_upper']].rename(columns={'ds':'DATA','yhat':'TARIFA_PRED'}).round(2)
+    st.subheader("Previsão mês a mês 2026")
+    st.table(f2026.set_index('DATA'))
+    # save
+    safe_name = (rota_sel if agg_mode=="Por Rota" else dest_sel).replace(" ","_").replace("/","_")
+    out_csv = os.path.join(OUTPUT_PATH, f"forecast_2026_{safe_name}.csv")
+    f2026.to_csv(out_csv, index=False)
+    st.success(f"Previsão salva em: {out_csv}")
+
+st.markdown("---")
+
+# -----------------------------
+# Exports: CSV + PPTX quick (speaker notes minimal)
+exp1, exp2 = st.columns(2)
+with exp1:
+    if st.button("Exportar CSV (filtrado)"):
+        outf = os.path.join(OUTPUT_PATH, "boraali_dataset_filtrado.csv")
+        dff.to_csv(outf, index=False)
+        st.success(f"CSV salvo: {outf}")
+with exp2:
+    if st.button("Gerar PPTX (4 slides)"):
+        try:
+            from pptx import Presentation
+            prs = Presentation()
+            s0 = prs.slides.add_slide(prs.slide_layouts[0])
+            s0.shapes.title.text = "Bora Alí — SR2"
+            s0.placeholders[1].text = "Tarifas, clima e previsão — Capitais"
+            s1 = prs.slides.add_slide(prs.slide_layouts[1]); s1.shapes.title.text = "Dados & Metodologia"
+            s1.placeholders[1].text = "Integração ANAC + INMET. Limpeza: outliers e padronização."
+            s2 = prs.slides.add_slide(prs.slide_layouts[1]); s2.shapes.title.text = "Insights"
+            s2.placeholders[1].text = "Estações vs tarifas; Top rotas; Companhias"
+            s3 = prs.slides.add_slide(prs.slide_layouts[1]); s3.shapes.title.text = "Previsão 2026"
+            s3.placeholders[1].text = "Prophet (regressor: temperatura)."
+            pptx_path = os.path.join(OUTPUT_PATH, "BoraAli_SR2_slides.pptx")
+            prs.save(pptx_path)
+            st.success(f"PPTX salvo: {pptx_path}")
+        except Exception as e:
+            st.error(f"Erro ao gerar PPTX: {e}")
+
+st.markdown("**Design:** linguagem 'Bora Alí' — legendas descoladas e diretas; foco em clareza e storytelling.")
+st.markdown("Made with 💙 by Bora Alí — boa sorte na SR2 ✈️")
 
