@@ -1,133 +1,123 @@
 # =============================================================================
-#  Bora Alí — Dashboard Urbano (Laranja Sunset)
-#  FINAL SR2 — 7 visualizações + Previsão 2026 + Ranking por Destino
-#  NÃO CRIE PASTAS. Basta ter INMET_ANAC_ROTAS_APENAS_CAPITAIS.csv NA RAIZ.
+# Bora Alí — SR2 ROXO (Foco TOTAL em Rotas em Alerta + Previsões 2026)
+# - Use: INMET_ANAC_ROTAS_APENAS_CAPITAIS.csv na raiz
+# - Misto: Regressão para ranking + Prophet nas top rotas
+# - Componente: Escolha ORIGEM & DESTINO -> Previsões mensais 2026 (tabela + gráfico + CSV)
+# - Imagens/assets usadas (caminhos locais enviados pelo usuário)
 # =============================================================================
 
-# ---------------------------------------------
-# IMPORTS
-# ---------------------------------------------
 import os
 import unicodedata
+import math
+from datetime import datetime
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+
 from prophet import Prophet
-from prophet.plot import plot_plotly
+from sklearn.linear_model import LinearRegression
 
 # ---------------------------------------------
-# CONFIGURAÇÃO DA PÁGINA 🔶
+# CONFIGURAÇÃO DA PÁGINA — Tema ROXO Bora Alí
 # ---------------------------------------------
-st.set_page_config(
-    page_title="Bora Alí — Dashboard Urbano",
-    layout="wide",
-    page_icon="🧳"
-)
+st.set_page_config(page_title="Bora Alí — SR2 (Rotas em Alerta)", layout="wide", page_icon="🛑")
 
-CSV_FILE = "INMET_ANAC_ROTAS_APENAS_CAPITAIS.csv"
-
-# 🎨 PALETA LARANJA SUNSET
+# Paleta ROXO (SR2)
+PURPLE = "#5A189A"
+PINK_ALERT = "#E11D48"
 ORANGE = "#FF6A00"
-PURPLE = "#6328E0"
-SOFT = "#FFD199"
-BG = "#FDFBFA"
+GRAFITE = "#1E1E1E"
+BG = "#FCF8FF"
 TEXT = "#0F172A"
 
-# Estilo global CSS
 st.markdown(f"""
 <style>
-body {{
-    background-color:{BG};
-}}
-h1,h2,h3,h4,h5 {{
-    color:{PURPLE};
-    font-weight:800;
-}}
-.stButton>button {{
-    background:{ORANGE};
-    color:white;
-    border-radius:10px;
-    font-weight:700;
-    padding:6px 12px;
-}}
+body {{ background-color: {BG}; color: {TEXT}; }}
+h1,h2,h3,h4 {{ color: {PURPLE}; font-weight:800; }}
+.stButton>button {{ background: {PURPLE}; color: white; border-radius:8px; padding:6px 10px; }}
+.reportview-container .main footer {{visibility: hidden;}}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧳 Bora Alí — Dashboard Urbano (Laranja Sunset)")
-st.caption("Capitais do Brasil, Rotas Aéreas + Temperatura | Jovem, Inteligente e Visual 🔥")
+st.title("🛑 Bora Alí — SR2: Rotas em Alerta (Foco total)")
+st.caption("Identifique rotas entre capitais com tendência de alta nas tarifas e evite surpresas em 2026. Tema: ROXO • Bora Alí")
 
 # ---------------------------------------------
-# FUNÇÕES DE NORMALIZAÇÃO DE CIDADES
+# ASSETS (usei os arquivos que você fez upload)
+# Se quiser trocar, altere as variáveis abaixo.
+# ---------------------------------------------
+ASSET_PDF_1 = "/mnt/data/Bora Alí — Capitais · Streamlit.pdf"
+ASSET_PDF_2 = "/mnt/data/Bora Alí — Dashboard (Capitais) · Streamlit.pdf"
+ASSET_PDF_3 = "/mnt/data/Untitled17.ipynb - Colab.pdf"
+ASSET_PDF_4 = "/mnt/data/Processos de Acompanhamento - BORA ALÍ (Cronograma) - Página1 (1).pdf"
+ASSET_PDF_5 = "/mnt/data/BORA ALÍ - SR1 (1).pdf"
+
+# Mostrar alguns assets visuais (muitos! foco visual SR2)
+with st.expander("📚 Materiais do projeto (clique para ver) — Imagens/PDFs"):
+    st.markdown("**Painéis & documentação** — use como referência visual para apresentação SR2.")
+    # Tentamos mostrar via tag <img>. Se não renderizar, aparece como link para download.
+    for p in [ASSET_PDF_1, ASSET_PDF_2, ASSET_PDF_5]:
+        if os.path.exists(p):
+            st.markdown(f'<div style="margin-bottom:8px"><a href="file://{p}" target="_blank">📎 Abrir {os.path.basename(p)}</a></div>', unsafe_allow_html=True)
+        else:
+            st.write(f"Arquivo não encontrado: {p}")
+
+# ---------------------------------------------
+# PATH CSV
+# ---------------------------------------------
+CSV_FILE = "INMET_ANAC_ROTAS_APENAS_CAPITAIS.csv"
+
+# ---------------------------------------------
+# FUNÇÕES AUXILIARES
 # ---------------------------------------------
 def normalize_str(s):
     if pd.isna(s): return s
     s = str(s)
     s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
     s = s.replace("_"," ").replace("-"," ")
-    return " ".join(s.split()).strip().lower()
-
-# Lista de capitais
-CANONICAL = [
-    "Rio Branco","Maceió","Macapá","Manaus","Salvador","Fortaleza","Brasília","Vitória","Goiânia",
-    "São Luís","Cuiabá","Campo Grande","Belo Horizonte","Belém","João Pessoa","Curitiba","Recife",
-    "Teresina","Rio de Janeiro","Natal","Porto Alegre","Porto Velho","Boa Vista","Florianópolis",
-    "Aracaju","São Paulo","Palmas"
-]
-NORM_TO_CANON = {normalize_str(c): c for c in CANONICAL}
-
-def map_city(city):
-    if pd.isna(city): return city
-    c = normalize_str(city)
-    if c in NORM_TO_CANON: return NORM_TO_CANON[c]
-    return city.title()
+    return " ".join(s.split()).strip().title()
 
 def parse_route(r):
     if pd.isna(r): return (None,None)
     s = str(r)
-    for sep in ["→","-","/"]:
+    for sep in ["→","->","-","/"]:
         if sep in s:
             p=[x.strip() for x in s.split(sep)]
             if len(p)>=2: return (p[0],p[-1])
     return (None,None)
 
-# ---------------------------------------------
-# LEITURA DO CSV + TRATAMENTO
-# ---------------------------------------------
-@st.cache_data
-def load_csv(path):
-    try:
-        df = pd.read_csv(path, low_memory=False)
-    except:
-        st.error(f"⛔ CSV NÃO ENCONTRADO: {path} — Coloque o arquivo na raiz e recarregue.")
-        st.stop()
+# map months to pt_BR names (manual para evitar dependência de locale)
+MES_NAME = {1:"Janeiro",2:"Fevereiro",3:"Março",4:"Abril",5:"Maio",6:"Junho",
+            7:"Julho",8:"Agosto",9:"Setembro",10:"Outubro",11:"Novembro",12:"Dezembro"}
 
+# ---------------------------------------------
+# CARREGAR CSV + TRATAMENTO (cacheado)
+# ---------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_and_prep(path):
+    if not os.path.exists(path):
+        st.error(f"⛔ CSV NÃO ENCONTRADO: {path} — coloque o arquivo na raiz e recarregue.")
+        st.stop()
+    df = pd.read_csv(path, low_memory=False)
+    # padronizar colunas
     df.columns = [c.upper().strip() for c in df.columns]
     for c in ["TARIFA","TEMP_MEDIA","TEMP_MIN","TEMP_MAX"]:
-        df[c] = pd.to_numeric(df.get(c), errors="coerce")
-
-    # Tratar temperatura média se faltar
-    if df["TEMP_MEDIA"].isna().all():
-        df["TEMP_MEDIA"] = (df["TEMP_MIN"] + df["TEMP_MAX"]) / 2
-
-    # Tratar origem/destino/rota
-    parsed = df["ROTA"].apply(lambda r: pd.Series(parse_route(r), index=["_o","_d"]))
-    df["ORIG"] = df.get("ORIGEM", parsed["_o"]).fillna(parsed["_o"]).apply(map_city)
-    df["DEST"] = df.get("DESTINO", parsed["_d"]).fillna(parsed["_d"]).apply(map_city)
-
+        if c in df.columns:
+            df[c] = pd.to_numeric(df.get(c), errors="coerce")
+    # parse rota / origem/destino
+    parsed = pd.DataFrame(df.get("ROTA", "").apply(lambda r: parse_route(r)).tolist(), columns=["_ORIG","_DEST"])
+    df["ORIG"] = df.get("ORIGEM", parsed["_ORIG"]).fillna(parsed["_ORIG"]).apply(normalize_str)
+    df["DEST"] = df.get("DESTINO", parsed["_DEST"]).fillna(parsed["_DEST"]).apply(normalize_str)
     # Datas
-    df["ANO"]=pd.to_numeric(df["ANO"],errors="coerce").fillna(0).astype(int)
-    df["MES"]=pd.to_numeric(df["MES"],errors="coerce").fillna(0).astype(int)
-    df["DATA"]=pd.to_datetime(df["ANO"].astype(str)+"-"+df["MES"].astype(str).str.zfill(2)+"-01")
-
-    # Nome do mês
-    MESES_NOME = {
-        1:"Janeiro",2:"Fevereiro",3:"Março",4:"Abril",5:"Maio",6:"Junho",
-        7:"Julho",8:"Agosto",9:"Setembro",10:"Outubro",11:"Novembro",12:"Dezembro"
-    }
-    df["MES_NOME"]=df["MES"].map(MESES_NOME)
-
+    df["ANO"] = pd.to_numeric(df.get("ANO", pd.NA), errors="coerce").fillna(0).astype(int)
+    df["MES"] = pd.to_numeric(df.get("MES", pd.NA), errors="coerce").fillna(0).astype(int)
+    df = df[(df["ANO"]>0) & (df["MES"]>0)]
+    df["DATA"] = pd.to_datetime(df["ANO"].astype(str) + "-" + df["MES"].astype(str).str.zfill(2) + "-01", errors="coerce")
+    df = df.dropna(subset=["DATA","ORIG","DEST","TARIFA"])
+    df["ROTA"] = df["ORIG"] + " → " + df["DEST"]
+    df["MES_NOME"] = df["MES"].map(MES_NAME)
     # Estações
     def est(m):
         if m in [12,1,2]: return "Verão"
@@ -135,16 +125,157 @@ def load_csv(path):
         if m in [6,7,8]: return "Inverno"
         return "Primavera"
     df["ESTACAO"] = df["MES"].apply(est)
-
-    df["ROTA"]=df["ORIG"]+" → "+df["DEST"]
     return df
 
-df = load_csv(CSV_FILE)
+df = load_and_prep(CSV_FILE)
+
+# reduzir ao conjunto de capitais que aparecem no dataset (segurança)
+CAPITAIS = sorted(list(pd.unique(df["ORIG"].tolist() + df["DEST"].tolist())))
+if not CAPITAIS:
+    st.error("⛔ Não foram encontradas capitais no dataset após tratamento.")
+    st.stop()
 
 # ---------------------------------------------
-# COORDENADAS DAS CAPITAIS DO BRASIL
+# SIDEBAR — Filtros SR2 (foco total)
 # ---------------------------------------------
-COORDS={
+st.sidebar.header("🎛️ Filtros — Foco SR2 (Rotas em Alerta)")
+ano_min, ano_max = int(df["ANO"].min()), int(df["ANO"].max())
+sel_anos = st.sidebar.multiselect("Ano (filtrar histórico)", sorted(df["ANO"].unique()), default=sorted(df["ANO"].unique()))
+sel_comp = st.sidebar.multiselect("Companhia (opcional)", sorted(df["COMPANHIA"].dropna().unique()), default=sorted(df["COMPANHIA"].dropna().unique()))
+sel_est = st.sidebar.multiselect("Estação", ["Verão","Outono","Inverno","Primavera"], default=["Verão","Outono","Inverno","Primavera"])
+
+dff = df[(df["ANO"].isin(sel_anos)) & (df["COMPANHIA"].isin(sel_comp)) & (df["ESTACAO"].isin(sel_est))]
+
+if dff.empty:
+    st.error("⛔ Nenhum registro após filtros.")
+    st.stop()
+
+# ---------------------------------------------
+# KPI Compactos
+# ---------------------------------------------
+st.markdown("---")
+k1,k2,k3,k4 = st.columns(4)
+k1.metric("📊 Registros (filtros)", f"{len(dff):,}")
+k2.metric("💰 Tarifa média", f"R$ {dff['TARIFA'].mean():.0f}")
+k3.metric("✈️ Rotas únicas", dff["ROTA"].nunique())
+k4.metric("📅 Período", f"{dff['ANO'].min()} → {dff['ANO'].max()}")
+
+# ---------------------------------------------
+# 1) CÁLCULO RÁPIDO: Regressão linear por ROTA (rápida para ranking)
+#    - Para todas as rotas calculamos previsão média 2026 via regressão linear
+#    - Depois rodamos Prophet apenas nas TOP rotas (MISTO)
+# ---------------------------------------------
+st.markdown("---")
+st.subheader("🔎 Processamento SR2 — Ranking rápido (regressão)")
+
+@st.cache_data(show_spinner=False)
+def compute_regression_rank(df_input):
+    # cria série temporal mensal média por rota
+    grp = df_input.groupby(["ROTA","DATA"]).agg(tar_media=("TARIFA","mean")).reset_index()
+    results = []
+    for rota, g in grp.groupby("ROTA"):
+        g_sorted = g.sort_values("DATA")
+        # mínimo de pontos para regressão (mês a mês)
+        if len(g_sorted) < 6:
+            continue
+        # transformar DATA em índice numérico (months since start)
+        start = g_sorted["DATA"].min()
+        g_sorted = g_sorted.copy()
+        g_sorted["t"] = ((g_sorted["DATA"].dt.year - start.year) * 12 + (g_sorted["DATA"].dt.month - start.month)).astype(int)
+        X = g_sorted[["t"]].values
+        y = g_sorted["tar_media"].values
+        model = LinearRegression()
+        model.fit(X, y)
+        slope = float(model.coef_[0])
+        intercept = float(model.intercept_)
+        # prever 12 meses de 2026: calcular t para Jan/2026..Dec/2026
+        # compute t for each month in 2026 relative to start
+        t_2026 = []
+        for m in range(1,13):
+            dt = pd.Timestamp(year=2026, month=m, day=1)
+            t_val = (dt.year - start.year) * 12 + (dt.month - start.month)
+            t_2026.append(t_val)
+        preds_2026 = model.predict(np.array(t_2026).reshape(-1,1))
+        pred_2026_mean = float(np.nanmean(preds_2026))
+        current_mean = float(np.nanmean(y))
+        pct_change = (pred_2026_mean - current_mean)/current_mean if current_mean>0 else np.nan
+        results.append({
+            "ROTA": rota,
+            "slope": slope,
+            "pred_2026_mean": pred_2026_mean,
+            "current_mean": current_mean,
+            "pct_change": pct_change,
+            "n_obs": len(g_sorted)
+        })
+    res_df = pd.DataFrame(results)
+    # classificar alertas
+    def label_row(r):
+        s = r["slope"]
+        pct = r["pct_change"]
+        # thresholds empíricos — ajuste se quiser
+        if pd.isna(pct): return "Sem dados"
+        if pct >= 0.20 or s > 5: return "🛑 Forte alta"
+        if pct >= 0.05 and pct < 0.20: return "⚠️ Atenção"
+        if pct < 0.0: return "📉 Queda"
+        return "⚠️ Atenção"
+    if not res_df.empty:
+        res_df["SINAL"] = res_df.apply(label_row, axis=1)
+        res_df = res_df.sort_values("pred_2026_mean", ascending=False).reset_index(drop=True)
+    return res_df
+
+rank_reg = compute_regression_rank(dff)
+
+st.write("Resumo rápido — ranking (regressão linear): as rotas com maior tarifa prevista para 2026")
+if rank_reg.empty:
+    st.info("Sem rotas com histórico suficiente para regressão.")
+else:
+    st.dataframe(rank_reg[["ROTA","current_mean","pred_2026_mean","pct_change","SINAL","n_obs"]].rename(
+        columns={"current_mean":"Média Atual (R$)","pred_2026_mean":"Média Prevista 2026 (R$)","pct_change":"Δ relativo"}).round(0))
+
+# ---------------------------------------------
+# 2) Selecionar TOP N rotas para ajuste fino com Prophet
+# ---------------------------------------------
+st.markdown("---")
+st.subheader("🔧 Ajuste Fino (Prophet) nas rotas mais relevantes — MISTO")
+
+TOP_N = st.number_input("Quantas rotas processar com Prophet (mais detalhado)?", min_value=3, max_value=30, value=10, step=1)
+run_prophet = st.button("🔮 Rodar Prophet nas Top rotas (processo mais lento)")
+
+prophet_results = {}
+if run_prophet and not rank_reg.empty:
+    with st.spinner("Rodando Prophet nas top rotas... (pode demorar)"):
+        top_routes = rank_reg.head(int(TOP_N))["ROTA"].tolist()
+        for rota in top_routes:
+            sub = dff[dff["ROTA"]==rota].groupby("DATA").agg(tar_media=("TARIFA","mean"), temp=("TEMP_MEDIA","mean")).reset_index().sort_values("DATA")
+            if len(sub) < 12:
+                continue
+            dfp = sub.rename(columns={"DATA":"ds","tar_media":"y","temp":"temp"})
+            m = Prophet(yearly_seasonality=True)
+            # adicionar regressor somente se temp existir
+            if "temp" in dfp.columns and dfp["temp"].notna().any():
+                try:
+                    m.add_regressor("temp")
+                except Exception:
+                    pass
+            m.fit(dfp)
+            future = m.make_future_dataframe(periods=12,freq="MS")
+            # preencher temp no futuro com média histórica da rota (simples)
+            if "temp" in dfp.columns:
+                future["temp"] = dfp["temp"].mean()
+            fc = m.predict(future)
+            fc_2026 = fc[fc["ds"].dt.year==2026][["ds","yhat"]].copy()
+            prophet_results[rota] = fc_2026
+    st.success("Prophet processado nas rotas selecionadas.")
+
+# ---------------------------------------------
+# 3) MAPA DE ROTAS — SINAL DE ALERTA
+# ---------------------------------------------
+st.markdown("---")
+st.subheader("🗺️ Mapa — Rotas em Alerta (visual)")
+
+# Simplified map: linhas entre capitais usando mediana das coordenadas do dataset (ou dicionário se quiser)
+# Aqui usamos uma lista simplificada de coordenadas internas (se desejar, substitua pelo seu dicionário)
+COORDS = {
 'Rio Branco':(-9.97499,-67.8243),'Maceió':(-9.6498,-35.7089),'Macapá':(0.0349,-51.0694),
 'Manaus':(-3.1190,-60.0217),'Salvador':(-12.9713,-38.5013),'Fortaleza':(-3.7172,-38.5433),
 'Brasília':(-15.7938,-47.8827),'Vitória':(-20.3155,-40.3128),'Goiânia':(-16.6868,-49.2647),
@@ -156,211 +287,155 @@ COORDS={
 'Aracaju':(-10.9472,-37.0731),'São Paulo':(-23.55052,-46.633308),'Palmas':(-10.184,-48.333)
 }
 
-# ---------------------------------------------
-# SIDEBAR — FILTROS
-# ---------------------------------------------
-st.sidebar.header("🎯 Filtros Inteligentes")
-
-anos = sorted(df["ANO"].unique())
-meses = sorted(df["MES_NOME"].dropna().unique())
-companias = sorted(df["COMPANHIA"].dropna().unique())
-estacoes=["Verão","Outono","Inverno","Primavera"]
-caps = sorted(list(COORDS.keys()))
-
-sel_ano = st.sidebar.multiselect("Ano", anos, default=anos)
-sel_mes = st.sidebar.multiselect("Mês", meses, default=meses)
-sel_comp = st.sidebar.multiselect("Companhia", companias, default=companias)
-sel_est = st.sidebar.multiselect("Estação", estacoes, default=estacoes)
-sel_cap = st.sidebar.multiselect("Capitais", caps, default=caps)
-
-dff = df[
-    (df["ANO"].isin(sel_ano)) &
-    (df["MES_NOME"].isin(sel_mes)) &
-    (df["COMPANHIA"].isin(sel_comp)) &
-    (df["ESTACAO"].isin(sel_est)) &
-    (df["ORIG"].isin(sel_cap)) &
-    (df["DEST"].isin(sel_cap))
-]
-
-if dff.empty:
-    st.error("⛔ Nenhum registro com esses filtros!")
-    st.stop()
-
-# ---------------------------------------------
-# KPIs
-# ---------------------------------------------
-st.markdown("---")
-c1,c2,c3,c4 = st.columns(4)
-c1.metric("📊 Registros", f"{len(dff):,}")
-c2.metric("💰 Tarifa média", f"R$ {dff['TARIFA'].mean():.0f}")
-c3.metric("🌡 Temp média", f"{dff['TEMP_MEDIA'].mean():.1f} °C")
-c4.metric("✈️ Rotas únicas", dff["ROTA"].nunique())
-
-# ---------------------------------------------
-# 1) MAPA — CAPITAIS (TARIFA & TEMPERATURA)
-# ---------------------------------------------
-st.markdown("---")
-st.subheader("🗺️ 1) Mapa das Capitais — Tarifa vs Temperatura")
-
-agg = dff.groupby("DEST").agg(
-    tarifa=("TARIFA","mean"),
-    temp=("TEMP_MEDIA","mean"),
-    regs=("TARIFA","count")
-).reset_index()
-agg["lat"]=agg["DEST"].map(lambda x:COORDS[x][0])
-agg["lon"]=agg["DEST"].map(lambda x:COORDS[x][1])
-
-fig1 = px.scatter_mapbox(
-    agg, lat="lat", lon="lon",
-    size="tarifa", color="temp",
-    hover_name="DEST",
-    hover_data={"tarifa":":.0f","temp":":.1f","regs":True,"lat":False,"lon":False},
-    size_max=45, zoom=3.1,
-    color_continuous_scale=[SOFT,ORANGE,PURPLE]
-)
-fig1.update_layout(
-    mapbox_style="carto-positron",
-    margin=dict(l=0,r=0,t=0,b=0)
-)
-st.plotly_chart(fig1, use_container_width=True)
-
-# ---------------------------------------------
-# 2) MAPA DE ROTAS — Premium
-# ---------------------------------------------
-st.markdown("---")
-st.subheader("🛫 2) Rotas Premium (espessura proporcional à tarifa)")
-
-routes = dff.groupby("ROTA").agg(tm=("TARIFA","mean"),regs=("TARIFA","count")).reset_index()
-routes[["O","D"]] = routes["ROTA"].apply(lambda r: pd.Series(parse_route(r)))
-routes["olat"]=routes["O"].map(lambda x:COORDS.get(map_city(x),(np.nan,np.nan))[0])
-routes["olon"]=routes["O"].map(lambda x:COORDS.get(map_city(x),(np.nan,np.nan))[1])
-routes["dlat"]=routes["D"].map(lambda x:COORDS.get(map_city(x),(np.nan,np.nan))[0])
-routes["dlon"]=routes["D"].map(lambda x:COORDS.get(map_city(x),(np.nan,np.nan))[1])
-routes=routes.dropna()
-
-if not routes.empty:
-    q=routes["tm"].quantile([0.25,0.5,0.75])
-    def width(x):
-        return 1.2 if x<=q[0.25] else 2.5 if x<=q[0.5] else 4 if x<=q[0.75] else 6
-    routes["w"]=routes["tm"].apply(width)
-
-    fig2=go.Figure()
-    for _,r in routes.iterrows():
-        fig2.add_trace(go.Scattermapbox(
-            lat=[r["olat"],r["dlat"]], lon=[r["olon"],r["dlon"]],
-            mode="lines",
-            line=dict(width=r["w"],color=ORANGE),
+# Prepara dados de rotas com sinal
+if not rank_reg.empty:
+    viz = rank_reg.copy()
+    # extrai origem/destino para plot
+    viz[["O","D"]] = viz["ROTA"].apply(lambda r: pd.Series(parse_route(r)))
+    viz = viz.dropna(subset=["O","D"])
+    # build map figure
+    fig_map = go.Figure()
+    for _, r in viz.iterrows():
+        o = r["O"]
+        d = r["D"]
+        if o not in COORDS or d not in COORDS:
+            continue
+        olat, olon = COORDS[o]
+        dlat, dlon = COORDS[d]
+        # linha color conforme sinal
+        col = PINK_ALERT if r["SINAL"]=="🛑 Forte alta" else ORANGE if r["SINAL"]=="⚠️ Atenção" else "green"
+        width = 6 if r["SINAL"]=="🛑 Forte alta" else 3 if r["SINAL"]=="⚠️ Atenção" else 1.5
+        fig_map.add_trace(go.Scattermapbox(
+            lat=[olat,dlat], lon=[olon,dlon],
+            mode="lines+markers",
+            line=dict(width=width, color=col),
+            marker=dict(size=6),
             hoverinfo="text",
-            text=f"<b>{r['ROTA']}</b><br>💰 R$ {r['tm']:.0f}<br>📌 {int(r['regs'])} registros"
+            text=f"{r['ROTA']} — Prev 2026: R$ {r['pred_2026_mean']:.0f} — {r['SINAL']}"
         ))
-    fig2.update_layout(
+    fig_map.update_layout(
         mapbox_style="carto-positron",
         mapbox_center={"lat":-14.2,"lon":-51.9},
         mapbox_zoom=3.1,
-        height=540,
+        height=520,
         margin=dict(l=0,r=0,t=0,b=0)
     )
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig_map, use_container_width=True)
 else:
-    st.info("Sem rotas com os filtros selecionados.")
+    st.info("Sem rotas a plotar no mapa (dados insuficientes).")
 
 # ---------------------------------------------
-# 3) Ranking Interativo — DESTINO
-# ---------------------------------------------
-st.markdown("---")
-st.subheader("🏆 3) Ranking Interativo — Destinos mais caros")
-
-rank = dff.groupby("DEST").agg(m=("TARIFA","mean"),reg=("TARIFA","count")).reset_index()
-rank = rank.sort_values("m",ascending=False)
-
-fig3 = px.bar(rank, x="DEST", y="m", color="m",
-              text=rank["m"].round(0),
-              color_continuous_scale=[SOFT,ORANGE,PURPLE])
-fig3.update_traces(textposition="outside")
-fig3.update_layout(yaxis_title="Tarifa média (R$)", xaxis_title="Destino")
-st.plotly_chart(fig3, use_container_width=True)
-
-# ---------------------------------------------
-# 4) Temporal
+# 4) COMPONENTE CENTRAL: ORIGEM → DESTINO → Previsões mensais 2026
 # ---------------------------------------------
 st.markdown("---")
-st.subheader("📈 4) Série Temporal — Variação de Tarifas")
+st.header("🔮 Previsão mensal 2026 — escolha Origem e Destino")
 
-ts = dff.groupby("DATA").agg(m=("TARIFA","mean")).reset_index()
-st.plotly_chart(px.line(ts,x="DATA",y="m",markers=True,color_discrete_sequence=[ORANGE])
-                .update_layout(yaxis_title="Tarifa média (R$)"), use_container_width=True)
+col1, col2, col3 = st.columns([3,3,2])
+with col1:
+    origem = st.selectbox("Origem", sorted(dff["ORIG"].unique()), index=0)
+with col2:
+    destino = st.selectbox("Destino", sorted(dff["DEST"].unique()), index=1)
+with col3:
+    btn_pred = st.button("📈 Gerar previsão 2026 para essa rota")
+
+rota_sel = f"{origem} → {destino}"
+
+def forecast_route(rota, df_all, use_prophet_if_possible=True):
+    # agrupa por DATA e gera média e temp média (se disponível)
+    sub = df_all[df_all["ROTA"]==rota].groupby("DATA").agg(tar_media=("TARIFA","mean"), temp=("TEMP_MEDIA","mean")).reset_index().sort_values("DATA")
+    if sub.shape[0] < 6:
+        return None, "Histórico insuficiente (mínimo 6 meses) para esta rota."
+    # 1) Regressão linear simples para previsão rápida (apenas como fallback/benchmark)
+    start = sub["DATA"].min()
+    sub = sub.copy()
+    sub["t"] = ((sub["DATA"].dt.year - start.year) * 12 + (sub["DATA"].dt.month - start.month)).astype(int)
+    X = sub[["t"]].values
+    y = sub["tar_media"].values
+    lr = LinearRegression().fit(X,y)
+    # previsão média 2026 via regressão (12 meses)
+    t_2026 = []
+    for m in range(1,13):
+        dt = pd.Timestamp(year=2026, month=m, day=1)
+        t_val = (dt.year - start.year) * 12 + (dt.month - start.month)
+        t_2026.append(t_val)
+    preds_lr = lr.predict(np.array(t_2026).reshape(-1,1))
+    df_lr_2026 = pd.DataFrame({"ds":[pd.Timestamp(year=2026,month=m,day=1) for m in range(1,13)], "yhat_lr": preds_lr})
+    # 2) Se possível, rodar Prophet para essa rota (mais preciso)
+    df_prophet_out = None
+    if use_prophet_if_possible and sub.shape[0] >= 12:
+        dfp = sub.rename(columns={"DATA":"ds","tar_media":"y"})
+        m = Prophet(yearly_seasonality=True)
+        if sub["temp"].notna().any():
+            try:
+                m.add_regressor("temp")
+            except Exception:
+                pass
+        try:
+            m.fit(dfp)
+            future = m.make_future_dataframe(periods=12,freq="MS")
+            if "temp" in dfp.columns:
+                future["temp"] = dfp["temp"].mean()
+            fc = m.predict(future)
+            df_prophet_out = fc[fc["ds"].dt.year==2026][["ds","yhat"]].rename(columns={"yhat":"yhat_prophet"})
+        except Exception as e:
+            df_prophet_out = None
+    # merge results: prefer Prophet where available, else LR
+    merged = df_lr_2026.copy()
+    if df_prophet_out is not None:
+        merged = merged.merge(df_prophet_out, on="ds", how="left")
+        merged["yhat_final"] = merged["yhat_prophet"].fillna(merged["yhat_lr"])
+    else:
+        merged["yhat_final"] = merged["yhat_lr"]
+    merged["Mes"] = merged["ds"].dt.month.map(MES_NAME)
+    merged["Tarifa Prevista (R$)"] = merged["yhat_final"].round(0)
+    return merged[["ds","Mes","Tarifa Prevista (R$)"]], None
+
+# Quando o usuário clica em gerar
+if btn_pred:
+    with st.spinner("Gerando previsão — regressão + Prophet (Misto)..."):
+        table_2026, err = forecast_route(rota_sel, dff, use_prophet_if_possible=True)
+    if err:
+        st.warning(err)
+    else:
+        st.markdown(f"### Resultado — Previsão Mensal 2026 para **{rota_sel}**")
+        # tabela
+        st.dataframe(table_2026.reset_index(drop=True).assign(ds=lambda df: df["ds"].dt.strftime("%Y-%m-%d")))
+        # gráfico
+        fig = px.line(table_2026, x="Mes", y="Tarifa Prevista (R$)", markers=True, title=f"📈 Previsão Mensal 2026 — {rota_sel}")
+        fig.update_layout(yaxis_title="Tarifa média prevista (R$)", xaxis_title="Mês")
+        st.plotly_chart(fig, use_container_width=True)
+        # download CSV
+        csv_out = table_2026.to_csv(index=False, encoding="utf-8")
+        st.download_button("⬇️ Baixar CSV da previsão (2026)", csv_out, file_name=f"previsao_2026_{origem}_{destino}.csv", mime="text/csv")
 
 # ---------------------------------------------
-# 5) Estações
+# 5) Ranking final "Evite essas rotas em 2026" (SR2 deliverable)
 # ---------------------------------------------
 st.markdown("---")
-st.subheader("🌦 5) Tarifa por Estação")
+st.header("🏆 Ranking SR2 — Evite essas rotas em 2026")
 
-est = dff.groupby("ESTACAO").agg(m=("TARIFA","mean")).reset_index()
-st.plotly_chart(px.bar(est,x="ESTACAO",y="m",text=est["m"].round(0),
-        color="ESTACAO",color_discrete_sequence=[SOFT,ORANGE,PURPLE,"#FFC872"])
-                .update_traces(textposition="outside"),use_container_width=True)
-
-# ---------------------------------------------
-# 6) Regiões
-# ---------------------------------------------
-st.markdown("---")
-st.subheader("🌎 6) Regiões com Tarifas mais caras")
-
-REG={
-"Norte":["Belém","Macapá","Manaus","Boa Vista","Rio Branco","Porto Velho","Palmas"],
-"Nordeste":["São Luís","Teresina","Fortaleza","Natal","João Pessoa","Recife","Maceió","Aracaju","Salvador"],
-"Centro-Oeste":["Brasília","Goiânia","Campo Grande","Cuiabá"],
-"Sudeste":["São Paulo","Rio de Janeiro","Belo Horizonte","Vitória"],
-"Sul":["Curitiba","Florianópolis","Porto Alegre"]
-}
-def reg(x):
-    for k,v in REG.items():
-        if x in v:return k
-    return "Outro"
-
-dff["REGIAO"]=dff["DEST"].apply(reg)
-regm=dff.groupby("REGIAO").agg(m=("TARIFA","mean")).reset_index()
-
-st.plotly_chart(
-    px.bar(regm,x="REGIAO",y="m",text=regm["m"].round(0),
-    color="REGIAO",color_discrete_sequence=[ORANGE,PURPLE,SOFT,"#A6E3E9","#FF8C42"])
-    .update_traces(textposition="outside")
-    .update_layout(yaxis_title="Tarifa média (R$)"), use_container_width=True
-)
-
-# ---------------------------------------------
-# 7) Heatmap
-# ---------------------------------------------
-st.markdown("---")
-st.subheader("🔥 7) Heatmap — Tarifas (Mês x Destino)")
-
-hm=dff.groupby(["MES_NOME","DEST"]).agg(m=("TARIFA","mean")).reset_index()
-pv=hm.pivot(index="DEST",columns="MES_NOME",values="m")
-st.plotly_chart(px.imshow(pv,color_continuous_scale=[SOFT,ORANGE,PURPLE],
-                          labels=dict(color="Tarifa média (R$)")),use_container_width=True)
-
-# ---------------------------------------------
-# 📌 PREVISÃO 2026 — Prophet
-# ---------------------------------------------
-st.markdown("---")
-st.header("🔮 Previsão 2026 — Tarifas por Rota")
-
-rota_escolha=st.selectbox("Escolha uma Rota:",sorted(dff["ROTA"].unique()))
-dfp=dff[dff["ROTA"]==rota_escolha].groupby("DATA").agg(tar=("TARIFA","mean"),
-                                                        temp=("TEMP_MEDIA","mean")).reset_index()
-
-if dfp.shape[0]>=12:
-    dfp2=dfp.rename(columns={"DATA":"ds","tar":"y","temp":"temp"})
-    model=Prophet(yearly_seasonality=True)
-    model.add_regressor("temp",mode="additive")
-    model.fit(dfp2)
-    future=model.make_future_dataframe(periods=12,freq="MS")
-    future["temp"]=dfp2["temp"].mean()
-    fc=model.predict(future)
-    st.plotly_chart(plot_plotly(model,fc),use_container_width=True)
+if rank_reg.empty:
+    st.info("Sem ranking calculado.")
 else:
-    st.warning("📌 Essa rota tem histórico insuficiente (mínimo 12 meses).")
+    # mostrar top 25 com sinal
+    top_display = rank_reg.copy()
+    top_display["pred_2026_mean"] = top_display["pred_2026_mean"].round(0)
+    top_display["current_mean"] = top_display["current_mean"].round(0)
+    top_display = top_display[["ROTA","current_mean","pred_2026_mean","pct_change","SINAL","n_obs"]].rename(
+        columns={"current_mean":"Atual (R$)","pred_2026_mean":"Prev 2026 (R$)","pct_change":"Δ relativo","n_obs":"Obs"}
+    )
+    st.dataframe(top_display.head(25).style.format({"Δ relativo":"{:.2%}"}))
+    st.markdown("**Legendas:** 🛑 Forte alta → Evitar; ⚠️ Atenção → Planejar com cautela; 📉 Queda → Boa oportunidade.")
 
-st.caption("🌇 Bora Alí © — Laranja Sunset | SR2 — Design Jovem, Urbano e Inteligente ✨")
+# ---------------------------------------------
+# 6) Export completo do ranking
+# ---------------------------------------------
+if not rank_reg.empty:
+    csv_rank = rank_reg.to_csv(index=False)
+    st.download_button("⬇️ Baixar Ranking SR2 (CSV)", csv_rank, file_name="ranking_sr2_rotas_prev_2026.csv", mime="text/csv")
 
+# ---------------------------------------------
+# RODAPÉ / INFO
+# ---------------------------------------------
+st.markdown("---")
+st.caption("Bora Alí — SR2 • Tema ROXO — Misto: regressão + Prophet. Visual e prático — pronto para apresentação.")
