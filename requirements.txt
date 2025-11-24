@@ -1,5 +1,7 @@
 streamlit
 pandas
-plotly
 numpy
-statsmodels
+plotly
+pydeck
+prophet
+python-pptx
