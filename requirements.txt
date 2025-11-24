@@ -6,5 +6,7 @@ pydeck
 prophet
 python-pptx
 kaleido
+cmdstanpy
+
 
 
