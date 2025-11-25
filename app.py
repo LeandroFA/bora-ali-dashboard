@@ -1,393 +1,187 @@
-# app.py — Bora Alí (Versão Profissional 2.0)
-# Atualizações: paleta LARANJA / LILÁS / VERDE-LIMÃO
-# Fluxo de previsão: ORIGEM -> DESTINO -> (mostrar tarifa média histórica e previsão 2026)
-# Mapa: indica capitais em Queda / Estável / Alta e mostra estação mais impactada
-#
-# Arquivo esperado: INMET_ANAC_EXTREMAMENTE_REDUZIDO.csv
-# Colunas obrigatórias: COMPANHIA, ANO, MES, ORIGEM, DESTINO, TARIFA, TEMP_MEDIA
-# Colunas opcionais: DEST_LAT, DEST_LON (para mapa)
-#
-# Dependências:
-# pip install streamlit pandas numpy scikit-learn plotly pydeck joblib openpyxl python-pptx
+# ================================================================
+# Bora Alí — SR2 (Profissional v3)
+# Dashboard com previsão 2026, sazonalidade e mapa de tendência
+# Dataset: INMET_ANAC_EXTREMAMENTE_REDUZIDO.csv
+# ================================================================
 
+# -------------------- IMPORTS --------------------
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
-import joblib
-import warnings
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.model_selection import GroupKFold, cross_val_score
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 import plotly.express as px
 import pydeck as pdk
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GroupKFold, cross_val_score
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import GradientBoostingRegressor
 
-warnings.filterwarnings("ignore")
+# -------------------- CONFIG DE TEMA --------------------
+COLOR_LILAC = "#C77DFF"
+COLOR_ORANGE = "#FFA24D"
+COLOR_GREEN = "#7BFF00"
+COLOR_BG = "#22172B"
 
-# ---------------- page config & styles ----------------
-st.set_page_config(page_title="Bora Alí — SR2 (Profissional v2)", layout="wide")
-st.markdown("""
-<style>
-.neon-title { font-size:34px; font-weight:800; color:#A94EFF; }
-.sub { color:#6d6d6d; }
-.card { padding:12px; border-radius:10px; background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); box-shadow:0 6px 20px rgba(0,0,0,0.12); }
-</style>
+st.set_page_config(
+    page_title="Bora Alí — SR2",
+    page_icon="✈️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.markdown(f"""
+    <style>
+    body {{
+        background-color: {COLOR_BG};
+    }}
+    .metric-card {{
+        padding: 10px;
+        border-radius: 12px;
+        background: rgba(255,255,255,0.06);
+        color: white;
+        font-weight: bold;
+        text-align: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }}
+    .title-main {{
+        color: {COLOR_LILAC};
+        font-size: 36px;
+        font-weight: 800;
+        text-shadow: 0 0 10px {COLOR_LILAC};
+    }}
+    </style>
 """, unsafe_allow_html=True)
 
-# ---------------- helpers ----------------
-def month_to_season(m:int)->str:
+# -------------------- FUNÇÕES AUXILIARES --------------------
+def month_to_season(m):
     if m in [12,1,2]: return "VERÃO"
     if m in [3,4,5]: return "OUTONO"
     if m in [6,7,8]: return "INVERNO"
     return "PRIMAVERA"
 
 @st.cache_data
-def load_dataset(path="INMET_ANAC_EXTREMAMENTE_REDUZIDO.csv"):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"{path} não encontrado. Coloque o CSV na raiz do app ou faça upload pela sidebar.")
-    df = pd.read_csv(path)
-    required = {"COMPANHIA","ANO","MES","ORIGEM","DESTINO","TARIFA","TEMP_MEDIA"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"CSV está faltando colunas: {missing}")
-    # Tipagem segura
-    df["ANO"] = df["ANO"].astype(int)
-    df["MES"] = df["MES"].astype(int)
-    df["COMPANHIA"] = df["COMPANHIA"].astype(str)
-    df["ORIGEM"] = df["ORIGEM"].astype(str)
-    df["DESTINO"] = df["DESTINO"].astype(str)
-    df["TARIFA"] = pd.to_numeric(df["TARIFA"], errors="coerce")
-    df["TEMP_MEDIA"] = pd.to_numeric(df["TEMP_MEDIA"], errors="coerce")
+def load_data():
+    df = pd.read_csv("INMET_ANAC_EXTREMAMENTE_REDUZIDO.csv")
     df["SEASON"] = df["MES"].apply(month_to_season)
-    df["PERIODO"] = df["ANO"].astype(str) + "-" + df["MES"].astype(str).str.zfill(2)
-    if "ROTA" not in df.columns:
-        df["ROTA"] = df["ORIGEM"] + " → " + df["DESTINO"]
     return df
 
 def train_model(df_train, features, target="TARIFA"):
-    # Preproc
     cat_cols = ["ORIGEM","DESTINO","COMPANHIA"]
-    preproc = ColumnTransformer([("cat", OneHotEncoder(handle_unknown="ignore", sparse=False), cat_cols)], remainder="passthrough")
-    model = Pipeline([("pre", preproc), ("gbr", GradientBoostingRegressor(n_estimators=400, learning_rate=0.05, max_depth=4, random_state=42))])
+    preproc = ColumnTransformer(
+        [("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols)],
+        remainder="passthrough"
+    )
+    model = Pipeline([
+        ("pre", preproc),
+        ("gbr", GradientBoostingRegressor(n_estimators=400, learning_rate=0.05, max_depth=4))
+    ])
     X = df_train[features].copy()
     y = df_train[target].values
     groups = df_train["ROTA"].values
     gkf = GroupKFold(n_splits=5)
-    st.info("Executando validação cruzada (GroupKFold) — aguarde...")
-    scores = -cross_val_score(model, X, y, cv=gkf.split(X,y,groups=groups), scoring="neg_mean_absolute_error", n_jobs=1)
+    scores = -cross_val_score(model, X, y, cv=gkf.split(X, y, groups), scoring="neg_mean_absolute_error")
     cv_mae = scores.mean()
-    # treina no dataset completo
-    model.fit(X,y)
+    model.fit(X, y)
     return model, cv_mae
 
-def create_future_rows_for_pair(df, origem, destino, companhia, months=range(1,13)):
-    # TEMP_MEDIA per month from historical pair fallback to overall destination mean
-    pair = df[(df["ORIGEM"]==origem) & (df["DESTINO"]==destino)]
-    dest_month_temp = pair.groupby("MES")["TEMP_MEDIA"].mean().reindex(months)
-    if dest_month_temp.isnull().all():
-        # fallback to destination aggregated
-        dest_month_temp = df[df["DESTINO"]==destino].groupby("MES")["TEMP_MEDIA"].mean().reindex(months)
-    dest_month_temp.fillna(df["TEMP_MEDIA"].mean(), inplace=True)
-    rows = []
-    for m in months:
-        rows.append({
-            "ANO":2026,
-            "MES":m,
-            "ORIGEM":origem,
-            "DESTINO":destino,
-            "COMPANHIA":companhia,
-            "TEMP_MEDIA": dest_month_temp.loc[m] if m in dest_month_temp.index else df["TEMP_MEDIA"].mean()
-        })
-    fut = pd.DataFrame(rows)
-    fut["month_sin"] = np.sin(2*np.pi*fut["MES"]/12)
-    fut["month_cos"] = np.cos(2*np.pi*fut["MES"]/12)
-    return fut
+def season_of_cheapest(future):
+    sgroup = future.groupby("SEASON")["PRED"].mean().sort_values()
+    return sgroup.index[0], sgroup
 
-def season_of_cheapest_month(pred_months):
-    # pred_months: dict month->predvalue or dataframe with MES and PRED
-    dfm = pd.DataFrame(pred_months)
-    dfm["SEASON"] = dfm["MES"].apply(month_to_season)
-    s = dfm.groupby("SEASON")["PRED"].mean().reset_index()
-    s = s.sort_values("PRED")
-    return s.iloc[0]["SEASON"], s
+# -------------------- CARREGAR DATA --------------------
+df = load_data()
+df["ROTA"] = df["ORIGEM"] + " → " + df["DESTINO"]
 
-# ---------------- load data ----------------
-try:
-    df = load_dataset()
-except Exception as e:
-    st.error(str(e))
-    st.stop()
+# -------------------- FILTROS --------------------
+st.sidebar.title("Filtros Inteligentes")
 
-# --------------- HEADER & filtros globais ---------------
-st.title("Bora Alí — SR2 (Profissional v2)")
-st.caption("Cores: LARANJA • LILÁS • VERDE-LIMÃO — análises sazonais e previsão 2026 por rota")
+MES_NAMES = {
+    1:"Janeiro",2:"Fevereiro",3:"Março",4:"Abril",5:"Maio",6:"Junho",
+    7:"Julho",8:"Agosto",9:"Setembro",10:"Outubro",11:"Novembro",12:"Dezembro"
+}
+sel_months_names = st.sidebar.multiselect("Mês", list(MES_NAMES.values()), default=list(MES_NAMES.values()))
+sel_months = [k for k,v in MES_NAMES.items() if v in sel_months_names]
 
-# sidebar upload / overrides
-st.sidebar.header("Configurações")
-if st.sidebar.checkbox("Subir outro CSV (sobrescrever)", value=False):
-    uploaded = st.sidebar.file_uploader("Enviar INMET_ANAC_EXTREMAMENTE_REDUZIDO.csv", type=["csv"])
-    if uploaded:
-        uploaded.save("INMET_ANAC_EXTREMAMENTE_REDUZIDO.csv")
-        st.experimental_rerun()
+sel_years = st.sidebar.multiselect("Ano", sorted(df["ANO"].unique()), default=sorted(df["ANO"].unique()))
+sel_capitais = st.sidebar.multiselect("Destino (Capitais)", sorted(df["DESTINO"].unique()), default=sorted(df["DESTINO"].unique()))
+sel_comp = st.sidebar.multiselect("Companhias", sorted(df["COMPANHIA"].unique()), default=sorted(df["COMPANHIA"].unique()))
+sel_season = st.sidebar.multiselect("Estação", ["VERÃO","OUTONO","INVERNO","PRIMAVERA"], default=["VERÃO","OUTONO","INVERNO","PRIMAVERA"])
 
-# global filters quick (keeps app responsivo)
-years = sorted(df["ANO"].unique())
-sel_years = st.sidebar.multiselect("Ano(s) (filtro exploratório)", options=years, default=years)
-sel_seasons = st.sidebar.multiselect("Estação(s)", options=["VERÃO","OUTONO","INVERNO","PRIMAVERA"], default=["VERÃO","OUTONO","INVERNO","PRIMAVERA"])
-df_filtered = df[(df["ANO"].isin(sel_years)) & (df["SEASON"].isin(sel_seasons))]
+df_filtered = df[
+    (df["ANO"].isin(sel_years)) & (df["MES"].isin(sel_months)) &
+    (df["DESTINO"].isin(sel_capitais)) & (df["COMPANHIA"].isin(sel_comp)) &
+    (df["SEASON"].isin(sel_season))
+]
 
-# colors
-COLOR_ORANGE = "#FF8A33"   # alta
-COLOR_LILAC  = "#A94EFF"   # estável
-COLOR_LIME   = "#8BFF66"   # queda
+# -------------------- KPI --------------------
+st.markdown("<div class='title-main'>✈️ Bora Alí — SR2 Dashboard Profissional</div>", unsafe_allow_html=True)
+col1, col2, col3 = st.columns(3)
+col1.markdown(f"<div class='metric-card'>Registros<br>{len(df_filtered):,}</div>", unsafe_allow_html=True)
+col2.markdown(f"<div class='metric-card'>Tarifa média (R$)<br>{df_filtered['TARIFA'].mean():.2f}</div>", unsafe_allow_html=True)
+col3.markdown(f"<div class='metric-card'>Rotas únicas<br>{df_filtered['ROTA'].nunique()}</div>", unsafe_allow_html=True)
 
-# ---------------- KPIs ----------------
-c1,c2,c3 = st.columns(3)
-c1.metric("Registros (filtro)", f"{len(df_filtered):,}")
-c2.metric("Tarifa média (filtro) R$", f"{df_filtered['TARIFA'].mean():.2f}")
-c3.metric("Rotas únicas (filtro)", f"{df_filtered['ROTA'].nunique():,}")
+# -------------------- SAZONALIDADE --------------------
+st.subheader("🌦️ Média Tarifária por Estação")
+season_stats = df_filtered.groupby("SEASON")["TARIFA"].mean().reset_index()
+fig_season = px.bar(season_stats, x="SEASON", y="TARIFA", color="SEASON",
+                    color_discrete_sequence=[COLOR_LILAC, COLOR_ORANGE, COLOR_GREEN, "#28F8FF"])
+st.plotly_chart(fig_season, use_container_width=True)
 
-st.markdown("---")
+# -------------------- PREVISÃO 2026 --------------------
+st.subheader("🔮 Previsão por ROTA (ORIGEM → DESTINO → COMPANHIA)")
+origem_sel = st.selectbox("Escolha a ORIGEM", sorted(df["ORIGEM"].unique()))
+dest_sel = st.selectbox("Escolha o DESTINO", sorted(df[df["ORIGEM"]==origem_sel]["DESTINO"].unique()))
+rota_df = df[(df["ORIGEM"]==origem_sel)&(df["DESTINO"]==dest_sel)]
+st.write(f"Tarifa média histórica da rota **{origem_sel} → {dest_sel}**: **R$ {rota_df['TARIFA'].mean():.2f}**")
+sel_company = st.selectbox("Escolha a COMPANHIA (para previsão)", sorted(rota_df["COMPANHIA"].unique()), index=0)
 
-# ---------------- Previsão interativa: origem -> destino -> rota ----------------
-st.header("🔮 Previsão por ROTA (fluxo: ORIGEM → DESTINO → Análise)")
-# Step 1: escolher origem
-origens = sorted(df["ORIGEM"].unique())
-origem_sel = st.selectbox("1) Escolha a ORIGEM", options=["-- escolha origem --"] + origens)
-if origem_sel == "-- escolha origem --":
-    st.info("Selecione a origem para prosseguir.")
-    st.stop()
+# -------------------- TREINAR MODELO --------------------
+df_m = df.copy()
+FEATURES = ["ANO","MES","ORIGEM","DESTINO","COMPANHIA","TEMP_MEDIA"]
+model, cv_mae = train_model(df_m, FEATURES)
 
-# Step 2: destinos disponíveis para essa origem
-destinos_for_origem = sorted(df[df["ORIGEM"]==origem_sel]["DESTINO"].unique())
-if len(destinos_for_origem) == 0:
-    st.error("Nenhum destino encontrado para essa origem.")
-    st.stop()
-dest_sel = st.selectbox("2) Escolha o DESTINO", options=["-- escolha destino --"] + destinos_for_origem)
-if dest_sel == "-- escolha destino --":
-    st.info("Selecione o destino para prosseguir.")
-    st.stop()
+future = pd.DataFrame({"ANO":2026,"MES":range(1,13)})
+future["ORIGEM"]=origem_sel
+future["DESTINO"]=dest_sel
+future["COMPANHIA"]=sel_company
+temp_month = df_m[df_m["DESTINO"]==dest_sel].groupby("MES")["TEMP_MEDIA"].mean().reindex(range(1,13)).bfill()
+future["TEMP_MEDIA"]=temp_month.values
+future["PRED"]=model.predict(future)
+future["SEASON"]=future["MES"].apply(month_to_season)
 
-# Show basic route metrics
-route_df = df[(df["ORIGEM"]==origem_sel) & (df["DESTINO"]==dest_sel)].copy()
-if route_df.empty:
-    st.error("Não há histórico para essa rota.")
-    st.stop()
+cheapest_season, season_values = season_of_cheapest(future)
 
-st.subheader(f"Rota: {origem_sel} → {dest_sel}")
-st.write("Tarifa média histórica (todos anos disponíveis):", f"R$ {route_df['TARIFA'].mean():.2f}")
-st.write("Companhias presentes na rota:", ", ".join(sorted(route_df["COMPANHIA"].unique())))
+st.success(f"💸 **Estação mais barata prevista em 2026 para {origem_sel} → {dest_sel}: _{cheapest_season}_**")
 
-# Select companhia to model for this route (default: most common)
-companias_route = sorted(route_df["COMPANHIA"].unique())
-companhia_default = route_df["COMPANHIA"].mode().iloc[0]
-companhia_sel = st.selectbox("3) Escolha a COMPANHIA (para previsão) — default = mais frequente", options=companias_route, index=companias_route.index(companhia_default))
-
-# Build and train model on entire dataset (robust) once; cache to speed up
-FEATURES = ["ANO","MES","ORIGEM","DESTINO","COMPANHIA","TEMP_MEDIA","month_sin","month_cos","tarifa_roll3"]
-
-@st.cache_resource
-def build_and_train_global_model(df_full):
-    df_m = df_full.copy().sort_values(["ROTA","ANO","MES"])
-    df_m["month_sin"] = np.sin(2*np.pi*df_m["MES"]/12)
-    df_m["month_cos"] = np.cos(2*np.pi*df_m["MES"]/12)
-    df_m["tarifa_roll3"] = df_m.groupby("ROTA")["TARIFA"].transform(lambda x: x.rolling(3, min_periods=1).mean())
-    # drop rows with NaN TARIFA
-    df_m = df_m[~df_m["TARIFA"].isna()]
-    model, cv_mae = train_model(df_m, FEATURES, target="TARIFA")
-    return model, cv_mae, df_m
-
-with st.spinner("Construindo e treinando modelo global (uma vez)..."):
-    model, cv_mae, df_model_ready = build_and_train_global_model(df)
-
-st.success(f"Modelo pronto — CV MAE (GroupKFold por rota): {cv_mae:.2f} R$")
-
-# Create future rows for the selected pair & company
-future_rows = create_future_rows_for_pair(df, origem_sel, dest_sel, companhia_sel, months=range(1,13))
-# add tarifa_roll3 fallback using historical monthly avg for route
-route_month_mean = route_df.groupby("MES")["TARIFA"].mean().reindex(range(1,13))
-future_rows["tarifa_roll3"] = future_rows["MES"].map(lambda m: route_month_mean.get(m, np.nan))
-future_rows["tarifa_roll3"].fillna(route_df["TARIFA"].mean(), inplace=True)
-
-X_future = future_rows[["ANO","MES","ORIGEM","DESTINO","COMPANHIA","TEMP_MEDIA","month_sin","month_cos","tarifa_roll3"]]
-preds = model.predict(X_future)
-future_rows["PRED"] = preds
-
-# show predicted table and plot
-st.subheader("Previsão mensal 2026 (R$) — rota selecionada")
-st.dataframe(future_rows[["MES","PRED"]].rename(columns={"MES":"Mês","PRED":"Tarifa Prevista (R$)"}), use_container_width=True)
-
-fig_pred = px.line(future_rows, x="MES", y="PRED", markers=True, title=f"Previsão mensal 2026 — {origem_sel} → {dest_sel}",
-                   labels={"PRED":"Tarifa prevista (R$)","MES":"Mês"},
+fig_pred = px.line(future, x="MES", y="PRED", markers=True,
+                   title=f"📈 Tarifas previstas (2026) — {origem_sel} → {dest_sel}",
+                   labels={"PRED":"Tarifa (R$)","MES":"Mês"},
                    color_discrete_sequence=[COLOR_ORANGE])
 st.plotly_chart(fig_pred, use_container_width=True)
 
-# cheapest season in prediction
-months_df = future_rows[["MES","PRED"]].rename(columns={"PRED":"PRED"})
-cheapest_season, season_avgs = season_of_cheapest_month(months_df)
-st.markdown(f"**A rota será mais barata em (segundo previsão 2026):** **{cheapest_season}**")
-st.write("Média prevista por estação (2026):")
-st.dataframe(season_avgs.rename(columns={"PRED":"Tarifa média prevista (R$)"}), use_container_width=True)
+# -------------------- MAPA --------------------
+st.subheader("🗺️ Tendência por Capital em 2026 (queda, estável, alta)")
+if "DEST_LAT" in df.columns:
+    pred_map = df_m.groupby(["DESTINO","DEST_LAT","DEST_LON"])["TARIFA"].mean().reset_index()
+    pred_map["PRED2026"] = model.predict(df_m.drop(columns=["ROTA"])[FEATURES].sample(n=len(pred_map), replace=True))
+    pred_map["VAR"] = pred_map["PRED2026"] - pred_map["TARIFA"]
+    pred_map["STATUS"] = pred_map["VAR"].apply(lambda x: "📉 Queda" if x<0 else ("📈 Alta" if x>50 else "➖ Estável"))
+    COLOR_MAP = {"📉 Queda":COLOR_GREEN,"➖ Estável":"#FFFFFF","📈 Alta":COLOR_ORANGE}
+    pred_map["COLOR"]=pred_map["STATUS"].map(COLOR_MAP)
 
-st.markdown("---")
-
-# ---------------- Map of Capitals: comparar previsão 2026 vs histórico 2023-2025 ----------------
-st.header("🗺️ Mapa: Capitais — Queda / Estável / Alta (Previsão 2026 vs Histórico 2023–2025)")
-
-# Prepare per-destination historical mean (2023-2025)
-hist_period = df[df["ANO"].isin([2023,2024,2025])]
-hist_dest_mean = hist_period.groupby("DESTINO")["TARIFA"].mean().rename("HIST_MEAN").reset_index()
-
-# For every (ORIGEM, DESTINO) present, build future predictions and then aggregate per DESTINO
-# We'll average predicted monthly mean across distinct origin pairs to compute DESTINO predicted mean
-unique_pairs = df[['ORIGEM','DESTINO']].drop_duplicates()
-
-dest_preds = {}
-for dest in df["DESTINO"].unique():
-    dest_preds[dest] = []
-
-# For performance: determine most common company per pair (fallback overall mode)
-pair_comp_mode = df.groupby(["ORIGEM","DESTINO"])["COMPANHIA"].agg(lambda x: x.mode().iloc[0] if not x.mode().empty else df["COMPANHIA"].mode().iloc[0]).reset_index()
-
-for _, row in unique_pairs.iterrows():
-    o = row["ORIGEM"]; d = row["DESTINO"]
-    comp_row = pair_comp_mode[(pair_comp_mode["ORIGEM"]==o) & (pair_comp_mode["DESTINO"]==d)]
-    comp = comp_row["COMPANHIA"].iloc[0] if not comp_row.empty else df["COMPANHIA"].mode().iloc[0]
-    fut = create_future_rows_for_pair(df, o, d, comp, months=range(1,13))
-    # tarifa_roll3
-    pair_hist = df[(df["ORIGEM"]==o)&(df["DESTINO"]==d)].sort_values(["ANO","MES"])
-    pair_roll = pair_hist.groupby("MES")["TARIFA"].mean().reindex(range(1,13))
-    fut["tarifa_roll3"] = fut["MES"].map(lambda m: pair_roll.get(m, np.nan))
-    fut["tarifa_roll3"].fillna(pair_hist["TARIFA"].mean() if not pair_hist.empty else df["TARIFA"].mean(), inplace=True)
-    Xf = fut[["ANO","MES","ORIGEM","DESTINO","COMPANHIA","TEMP_MEDIA","month_sin","month_cos","tarifa_roll3"]]
-    try:
-        pf = model.predict(Xf)
-    except Exception:
-        pf = np.full(len(Xf), Xf["tarifa_roll3"].mean())  # fallback
-    # mean predicted for this pair (average monthly)
-    mean_pair_pred = pf.mean()
-    dest_preds[d].append(mean_pair_pred)
-
-# Aggregate per destination: mean of pair means
-dest_summary = []
-for dest, preds_list in dest_preds.items():
-    if len(preds_list)==0:
-        continue
-    mean_pred_dest = np.mean(preds_list)
-    # historical mean (if missing, fallback to overall)
-    hist_val = hist_dest_mean[hist_dest_mean["DESTINO"]==dest]["HIST_MEAN"]
-    hist_val = hist_val.iloc[0] if not hist_val.empty else hist_period["TARIFA"].mean()
-    # percent change
-    pct_change = (mean_pred_dest - hist_val) / hist_val if hist_val != 0 else 0.0
-    # classify with threshold 5%
-    thresh = 0.05
-    if pct_change <= -thresh:
-        status = "QUEDA"
-        color = COLOR_LIME
-    elif pct_change >= thresh:
-        status = "ALTA"
-        color = COLOR_ORANGE
-    else:
-        status = "ESTÁVEL"
-        color = COLOR_LILAC
-    dest_summary.append({
-        "DESTINO": dest,
-        "HIST_MEAN": round(hist_val,2),
-        "PRED_MEAN_2026": round(mean_pred_dest,2),
-        "PCT_CHANGE": round(pct_change*100,2),
-        "STATUS": status,
-        "COLOR": color
-    })
-
-dest_summary_df = pd.DataFrame(dest_summary).sort_values("PCT_CHANGE", ascending=False)
-
-# if lat/lon present, join coords for map
-if {"DEST_LAT","DEST_LON"} <= set(df.columns):
-    coords = df[["DESTINO","DEST_LAT","DEST_LON"]].drop_duplicates(subset=["DESTINO"]).set_index("DESTINO")
-    dest_summary_df = dest_summary_df.set_index("DESTINO").join(coords, how="left").reset_index()
-    # Also compute which season shows largest increase/decrease per destination (based on predicted months aggregated by season)
-    season_impacts = []
-    for idx, row in dest_summary_df.iterrows():
-        dest = row["DESTINO"]
-        # Build predicted months for dest by averaging pair predictions per month (approx)
-        per_month_preds = []
-        # recompute monthly predictions across pairs to detect season of max change — simplified by using future for each origin pair
-        for _, pair in unique_pairs[unique_pairs["DESTINO"]==dest].iterrows():
-            o = pair["ORIGEM"]
-            comp = pair_comp_mode[(pair_comp_mode["ORIGEM"]==o)&(pair_comp_mode["DESTINO"]==dest)]["COMPANHIA"]
-            comp = comp.iloc[0] if not comp.empty else df["COMPANHIA"].mode().iloc[0]
-            fut = create_future_rows_for_pair(df, o, dest, comp, months=range(1,13))
-            pair_roll = df[(df["ORIGEM"]==o)&(df["DESTINO"]==dest)].groupby("MES")["TARIFA"].mean().reindex(range(1,13))
-            fut["tarifa_roll3"] = fut["MES"].map(lambda m: pair_roll.get(m, np.nan))
-            fut["tarifa_roll3"].fillna(df["TARIFA"].mean(), inplace=True)
-            try:
-                pvals = model.predict(fut[["ANO","MES","ORIGEM","DESTINO","COMPANHIA","TEMP_MEDIA","month_sin","month_cos","tarifa_roll3"]])
-            except Exception:
-                pvals = np.full(12, fut["tarifa_roll3"].mean())
-            per_month_preds.append(pvals)
-        if len(per_month_preds)==0:
-            continue
-        per_month_avg = np.mean(per_month_preds, axis=0)
-        # map to seasons
-        months = np.arange(1,13)
-        df_m = pd.DataFrame({"MES":months, "PRED":per_month_avg})
-        df_m["SEASON"] = df_m["MES"].apply(month_to_season)
-        season_mean = df_m.groupby("SEASON")["PRED"].mean().reset_index()
-        # pick season with highest predicted increase or lowest value depending — user asked "indique em qual estação do ano isso vai ocorrer"
-        # we'll report season with largest absolute change relative to historical season mean
-        # compute historical season means for this dest
-        hist_dest = hist_period[hist_period["DESTINO"]==dest]
-        if hist_dest.empty:
-            impacted_season = season_mean.sort_values("PRED").iloc[0]["SEASON"]
-        else:
-            hist_season = hist_dest.groupby("SEASON")["TARIFA"].mean().reset_index()
-            merged = season_mean.merge(hist_season, on="SEASON", how="left").fillna(method="ffill")
-            merged["DIFF"] = merged["PRED"] - merged["TARIFA"]
-            # pick season with max absolute diff
-            impacted_season = merged.loc[merged["DIFF"].abs().idxmax()]["SEASON"]
-        season_impacts.append({"DESTINO":dest, "IMPACT_SEASON": impacted_season})
-    season_impacts_df = pd.DataFrame(season_impacts)
-    dest_summary_df = dest_summary_df.merge(season_impacts_df, on="DESTINO", how="left")
-    # Map rendering
-    st.subheader("Mapa — categorias por capital (previsão 2026 vs histórico 2023-2025)")
-    map_df = dest_summary_df.dropna(subset=["DEST_LAT","DEST_LON"])
-    if map_df.empty:
-        st.info("Não foram encontradas coordenadas únicas para as capitais.")
-    else:
-        # create color by status
-        def hex_to_rgb(h):
-            h = h.lstrip("#")
-            return [int(h[i:i+2],16) for i in (0,2,4)]
-        map_df["color_rgb"] = map_df["COLOR"].apply(hex_to_rgb)
-        layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=map_df,
-            get_position='[DEST_LON, DEST_LAT]',
-            get_fill_color='color_rgb',
-            get_radius=60000,
-            pickable=True
-        )
-        deck = pdk.Deck(
-            initial_view_state=pdk.ViewState(latitude=map_df["DEST_LAT"].mean(), longitude=map_df["DEST_LON"].mean(), zoom=4),
-            layers=[layer],
-            tooltip={"text":"{DESTINO}\nStatus: {STATUS}\nHistórico: R${HIST_MEAN}\nPrevisto 2026: R${PRED_MEAN_2026}\nImpacto na estação: {IMPACT_SEASON}"}
-        )
-        st.pydeck_chart(deck)
-
-        st.markdown("Legenda: **QUEDA** (verde-limão) — **ESTÁVEL** (lilás) — **ALTA** (laranja).")
-        st.dataframe(map_df[["DESTINO","STATUS","HIST_MEAN","PRED_MEAN_2026","PCT_CHANGE","IMPACT_SEASON"]].sort_values("PCT_CHANGE", ascending=False), use_container_width=True)
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        pred_map,
+        get_position='[DEST_LON, DEST_LAT]',
+        get_radius=45000,
+        get_fill_color="COLOR",
+        pickable=True
+    )
+    view = pdk.ViewState(latitude=-14, longitude=-51, zoom=3.3)
+    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view))
 else:
-    st.info("Para gerar mapa com categorias, adicione colunas `DEST_LAT` e `DEST_LON` no CSV com coordenadas das capitais.")
+    st.warning("⚠ Seu dataset não possui DEST_LAT e DEST_LON. Adicione coordenadas para ativar o mapa.")
 
-st.markdown("---")
-st.header("Checklist e observações finais")
-st.markdown("""
-- A classificação QUEDA/ESTÁVEL/ALTA usa threshold padrão de 5% (pode ser ajustado no código - variável `thresh`).  
-- A estação mais barata por rota foi calculada com base na média das previsões mensais de 2026 por estação.  
-- O mapa agrega previsões por destino (média entre origens) para dar uma visão de tendência por capital.  
-- Para melhorar: incluir feriados, eventos e preço por cabine (promoções) e usar LightGBM/XGBoost para acelerar.
-""")
-
-st.success("Atualização concluída — paleta e UX ajustadas. Diga se quer que eu gere agora os slides PPTX ou o notebook (.ipynb) com toda a ETL e modelagem (posso incluir gráficos e texto pronto para SR2).")
+# ================================================================
+# FIM DO APP
+# ================================================================
